@@ -105,8 +105,67 @@ start
 
 ## STSPIN32G4のFAULT発生時
 
-起動時にSTSPIN32G4のSTATUSレジスタを確認し、FAULTがあれば自動的に
-CLEARコマンドを送信します。クリア後もRESET、VDS、THSD、VCC_UVLOの
-いずれかが残っている場合、モーターPWMは開始されません。
+起動時・`start`・`run cw/ccw <rpm>`では、毎回次の順でPWMを開始します。
 
-現在、FAULT確認専用のシリアルコマンドはありません。
+1. PWMを停止し、既存のFAULTがあればCLEARして充電可能な状態か確認。
+2. High-side 3相をOFF、Low-side 3相を約0.75 ms ONにしてbootstrapを充電。
+3. 全相OFFにし、CLEARコマンドを送信。
+4. 200 µs待ってSTATUSとPE15のnFAULTを確認し、正常ならPWMを開始。
+
+充電時間は`Core/Inc/motor_control_config.h`の
+`MOTOR_CONTROL_BOOTSTRAP_CHARGE_US`（初期値750 µs、設定範囲500～1000 µs）で変更できます。
+DWTサイクルカウンタで待ち時間を作ります。割り込み処理による延長はあり得ます。
+充電中はTIM1の強制非アクティブモードでHigh-sideをLow、相補Low-sideをHighにします。
+充電後は通常のPWMモードへ戻します。
+
+前後の確認でRESET、VDS、THSD、VCC_UVLOのいずれかが残る、nFAULTがLow、
+またはI2Cエラーの場合はPWMを開始せず、停止を維持します。
+起動時にFAULTで開始できなかった場合も、原因を取り除いた後に`start`や`run`で再試行できます。
+
+### FAULT確認コマンド
+
+`fault`（大文字の`FAULT`も可）を改行付きで送信すると、その時点の
+STATUSレジスタ（0x80）をI2C3で読み、PE15のnFAULTピン状態とともに返信します。
+前後の空白は許容します。FAULTのクリアやPWM状態の変更は行いません。
+起動時のFAULTでPWMが開始されなかった場合も使用できます。
+ADC取得中・CSV送信中は従来どおり`stop`のみ受け付けるため、完了後に送信してください。
+
+返信例（FAULTなし、保護レジスタはロック中）:
+
+```text
+STSPIN32G4 STATUS current: 0x80 [LOCK=1 RESET=0 VDS=0 THSD=0 VCC_UVLO=0]
+STSPIN32G4 nFAULT (PE15): 1 (HIGH, inactive)
+```
+
+- `RESET`: レジスタのリセット履歴、`VDS`: VDS保護の作動、
+  `THSD`: 過熱保護、`VCC_UVLO`: ゲート駆動電源の低電圧保護。各ビットは1で該当状態です。
+- `LOCK`は保護レジスタのロック状態であり、FAULT原因ではありません。
+- nFAULTはアクティブLowです。`0 (LOW, asserted)`はFAULT信号が出ている状態、
+  `1 (HIGH, inactive)`は信号が出ていない状態です。
+- I2C読み出し失敗時は`STATUS read failed`とHALステータス・エラーコードを返信し、
+  nFAULTピン状態も返信します。レジスタ値とピンは順番に読み出すため、同時刻の値ではありません。
+- 原因を示すレジスタの正式名称は`STATUS`です。`NFAULT`レジスタ（0x08）は
+  ピンに通知する保護の設定用であり、このコマンドではSTATUSを読みます。
+
+### FAULTクリアコマンド
+
+`fault clear`（大文字の`FAULT CLEAR`も可）を改行付きで送信すると、
+PWMを停止してからSTATUSレジスタとnFAULTピンを表示し、CLEARレジスタ（0x09）へ
+0xFFを書き込みます。1 ms待機後、STATUSとnFAULTを再度表示します。
+前後の空白は許容します。`fault`と`clear`の間は半角スペース1文字です。
+
+```text
+fault clear
+```
+
+- `before clear`と`after clear`でクリア前後を確認できます。
+  `CLEAR command sent`は書き込み成功を示し、FAULTが解消したことの保証ではありません。
+  過熱や低電圧などの原因が残っていれば、クリア後もFAULTが残ります。
+- クリア前のSTATUS読み出しに失敗した場合は、クリアを中止します。
+  CLEAR書き込みやクリア後の読み出しに失敗した場合もエラーを返信します。
+- クリア後もPWMは停止状態を維持します。通常の再開は`start`または`run`で行います。
+  再開時にも上記のbootstrap充電とFAULT確認を行います。
+- ADC取得中・CSV送信中は使用できません。完了後に送信してください。
+
+参考: [STSPIN32G4データシート](https://www.st.com/resource/en/datasheet/stspin32g4.pdf)
+（MCUとゲートドライバーの内部接続、NFAULT設定、STATUSレジスタ）。

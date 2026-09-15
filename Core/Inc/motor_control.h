@@ -18,10 +18,12 @@ typedef enum
 } MotorControlPhase;
 
 /**
- * @brief Start three-phase complementary PWM at the 50% midpoint duty.
+ * @brief Charge bootstraps, clear faults, then start PWM at 50% duty.
  * @param htim Advanced-control timer with CH1/CH1N through CH3/CH3N.
+ * @param hi2c Gate-driver I2C handle. Failed starts leave PWM stopped.
  */
-HAL_StatusTypeDef MotorControl_Init(TIM_HandleTypeDef *htim);
+HAL_StatusTypeDef MotorControl_Init(TIM_HandleTypeDef *htim,
+                                     I2C_HandleTypeDef *hi2c);
 
 /**
  * @brief Parse and apply one serial command.

@@ -25,6 +25,7 @@
 #include "current_sense.h"
 #include "motor_control.h"
 #include "stspin32g4.h"
+#include <ctype.h>
 #include <stdio.h>
 
 /* USER CODE END Includes */
@@ -97,6 +98,93 @@ static void PrintGateDriverStatus(const char *label, uint8_t status)
          (status & STSPIN32G4_STATUS_VCC_UVLO) != 0U);
 }
 
+static bool IsGateDriverCommand(const char *command, const char *expected)
+{
+  while (isspace((unsigned char)*command) != 0)
+  {
+    command++;
+  }
+  while (*expected != '\0')
+  {
+    if (tolower((unsigned char)*command) != *expected)
+    {
+      return false;
+    }
+    command++;
+    expected++;
+  }
+  while (isspace((unsigned char)*command) != 0)
+  {
+    command++;
+  }
+  return (*command == '\0');
+}
+
+static bool ReadAndPrintGateDriverFault(const char *label)
+{
+  uint8_t status;
+  HAL_StatusTypeDef result;
+  GPIO_PinState nfault;
+  /* Read only: preserve latched faults for diagnosis. Sample PE15 even
+     when I2C fails; the register and pin are sequential snapshots. */
+  result = STSPIN32G4_ReadStatus(&hi2c3, &status);
+  nfault = HAL_GPIO_ReadPin(GPIOE, GPIO_PIN_15);
+  if (result == HAL_OK)
+  {
+    PrintGateDriverStatus(label, status);
+  }
+  else
+  {
+    printf("STSPIN32G4 STATUS read failed: HAL status=%d, HAL error=0x%08lX\r\n",
+           (int)result,
+           (unsigned long)HAL_I2C_GetError(&hi2c3));
+  }
+  printf("STSPIN32G4 nFAULT (PE15): %u (%s)\r\n",
+         (unsigned int)(nfault == GPIO_PIN_SET),
+         (nfault == GPIO_PIN_RESET) ? "LOW, asserted" : "HIGH, inactive");
+  return (result == HAL_OK);
+}
+
+static bool ProcessGateDriverFaultCommand(const char *command)
+{
+  HAL_StatusTypeDef result;
+
+  if (IsGateDriverCommand(command, "fault"))
+  {
+    (void)ReadAndPrintGateDriverFault("current");
+    return true;
+  }
+  if (!IsGateDriverCommand(command, "fault clear"))
+  {
+    return false;
+  }
+
+  /* Clearing the driver latch can re-enable its outputs. Stop PWM first. */
+  MotorControl_Stop();
+  printf("PWM stopped for fault clear\r\n");
+  if (!ReadAndPrintGateDriverFault("before clear"))
+  {
+    printf("FAULT clear aborted: STATUS is unavailable\r\n");
+    return true;
+  }
+
+  result = STSPIN32G4_ClearFaults(&hi2c3);
+  if (result != HAL_OK)
+  {
+    printf("STSPIN32G4 CLEAR failed: HAL status=%d, HAL error=0x%08lX\r\n",
+           (int)result,
+           (unsigned long)HAL_I2C_GetError(&hi2c3));
+  }
+  else
+  {
+    printf("STSPIN32G4 CLEAR command sent\r\n");
+  }
+  /* Same settling time as the startup fault-clear sequence. */
+  HAL_Delay(1U);
+  (void)ReadAndPrintGateDriverFault("after clear");
+  return true;
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -139,9 +227,6 @@ int main(void)
   MX_ADC2_Init();
   MX_OPAMP3_Init();
   /* USER CODE BEGIN 2 */
-  STSPIN32G4_FaultReport gate_driver_report;
-  HAL_StatusTypeDef gate_driver_result;
-
   Console_Init(&huart1);
 
   if (CurrentSense_Init(&hadc1,
@@ -158,39 +243,16 @@ int main(void)
 
   /* The internal VCC buck soft-start is 3.3 ms according to the datasheet. */
   HAL_Delay(5U);
-  gate_driver_result =
-    STSPIN32G4_CheckAndClearFaults(&hi2c3, &gate_driver_report);
-
-  if (gate_driver_result != HAL_OK)
+  if (MotorControl_Init(&htim1, &hi2c3) != HAL_OK)
   {
-    printf("STSPIN32G4 I2C error: HAL status=%d, HAL error=0x%08lX\r\n",
-           (int)gate_driver_result,
-           (unsigned long)HAL_I2C_GetError(&hi2c3));
     printf("Motor PWM remains disabled\r\n");
   }
   else
   {
-    PrintGateDriverStatus("before clear", gate_driver_report.before_clear);
-    if (gate_driver_report.clear_requested)
-    {
-      PrintGateDriverStatus("after clear", gate_driver_report.after_clear);
-    }
-
-    if (STSPIN32G4_StatusHasFault(gate_driver_report.after_clear))
-    {
-      printf("Motor PWM remains disabled: gate-driver fault is still active\r\n");
-    }
-    else if (MotorControl_Init(&htim1) != HAL_OK)
-    {
-      Error_Handler();
-    }
-    else
-    {
-      printf("TIM1 three-phase PWM started at U=V=W=50.00 %%\r\n");
-      printf("Command: <offset>, u/v/w <offset>, mid, stop, start, "
-             "run cw/ccw <rpm>, status, adc\r\n");
-    }
+    printf("TIM1 three-phase PWM started at U=V=W=50.00 %%\r\n");
   }
+  printf("Command: <offset>, u/v/w <offset>, mid, stop, start, "
+         "run cw/ccw <rpm>, status, adc, fault, fault clear\r\n");
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -211,7 +273,8 @@ int main(void)
           printf("ADC capture/transfer is busy; only 'stop' is accepted\r\n");
         }
       }
-      else if (!CurrentSense_ProcessCommand(motor_command))
+      else if (!ProcessGateDriverFaultCommand(motor_command) &&
+               !CurrentSense_ProcessCommand(motor_command))
       {
         (void)MotorControl_ProcessCommand(motor_command);
       }
@@ -796,6 +859,7 @@ static void MX_DMA_Init(void)
   */
 static void MX_GPIO_Init(void)
 {
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
   /* USER CODE BEGIN MX_GPIO_Init_1 */
 
   /* USER CODE END MX_GPIO_Init_1 */
@@ -806,6 +870,12 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
+
+  /*Configure GPIO pin : PE15 */
+  GPIO_InitStruct.Pin = GPIO_PIN_15;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 

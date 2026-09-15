@@ -4,6 +4,9 @@
 /* Motor and open-loop six-step parameters. */
 #define MOTOR_CONTROL_POLE_PAIRS                    7U
 
+/* Charge all three bootstrap capacitors before each PWM start. */
+#define MOTOR_CONTROL_BOOTSTRAP_CHARGE_US           750U
+
 /*
  * Six-step duty profile. Duty values use 0.1 % units (50 = 5.0 %).
  *

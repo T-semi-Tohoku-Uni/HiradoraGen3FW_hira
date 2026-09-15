@@ -1,4 +1,5 @@
 #include "motor_control.h"
+#include "stspin32g4.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -14,6 +15,11 @@
 #define MOTOR_CONTROL_PHASE_U_OUTPUTS (TIM_CCER_CC1E | TIM_CCER_CC1NE)
 #define MOTOR_CONTROL_PHASE_V_OUTPUTS (TIM_CCER_CC2E | TIM_CCER_CC2NE)
 #define MOTOR_CONTROL_PHASE_W_OUTPUTS (TIM_CCER_CC3E | TIM_CCER_CC3NE)
+
+#if (MOTOR_CONTROL_BOOTSTRAP_CHARGE_US < 500U) || \
+    (MOTOR_CONTROL_BOOTSTRAP_CHARGE_US > 1000U)
+#error "Bootstrap charge time must be between 500 and 1000 us"
+#endif
 
 #if (MOTOR_CONTROL_POLE_PAIRS == 0U)
 #error "MOTOR_CONTROL_POLE_PAIRS must be greater than zero"
@@ -62,6 +68,7 @@ typedef enum
 } MotorControlDirection;
 
 static TIM_HandleTypeDef *motor_timer;
+static I2C_HandleTypeDef *gate_driver_i2c;
 static MotorControlPhase selected_phase = MOTOR_CONTROL_PHASE_U;
 static float selected_offset_percent;
 static bool outputs_enabled;
@@ -170,10 +177,109 @@ static void MotorControl_WriteMidpoint(void)
   __HAL_TIM_SET_COMPARE(motor_timer, TIM_CHANNEL_3, midpoint);
 }
 
-static void MotorControl_StartAtMidpoint(void)
+static void MotorControl_DelayMicroseconds(uint32_t microseconds)
+{
+  const uint32_t cycles = (uint32_t)
+    (((uint64_t)SystemCoreClock * microseconds) / 1000000U);
+  const uint32_t start_cycles = DWT->CYCCNT;
+
+  while ((uint32_t)(DWT->CYCCNT - start_cycles) < cycles)
+  {
+    /* Interrupts remain enabled; the motor mode stays STOPPED. */
+  }
+}
+
+static HAL_StatusTypeDef MotorControl_PreparePwmStart(void)
 {
   TIM_TypeDef *tim = motor_timer->Instance;
-  uint32_t interrupt_state = __get_PRIMASK();
+  STSPIN32G4_FaultReport report;
+  HAL_StatusTypeDef result;
+  uint8_t status;
+  GPIO_PinState nfault;
+  uint32_t saved_ccmr1;
+  uint32_t saved_ccmr2;
+
+  MotorControl_Stop();
+
+  /* An existing latch can block even the low-side charging pulse. */
+  result = STSPIN32G4_CheckAndClearFaults(gate_driver_i2c, &report);
+  if (result != HAL_OK)
+  {
+    goto i2c_error;
+  }
+  if (STSPIN32G4_StatusHasFault(report.after_clear) ||
+      (HAL_GPIO_ReadPin(GPIOE, GPIO_PIN_15) == GPIO_PIN_RESET))
+  {
+    printf("PWM start blocked before bootstrap: STATUS=0x%02X\r\n",
+           report.after_clear);
+    return HAL_ERROR;
+  }
+
+  /* DWT gives a sub-ms pulse without HAL_Delay's 1 ms tick rounding.
+     Do not reset CYCCNT: other timing users may be using it. */
+  SET_BIT(CoreDebug->DEMCR, CoreDebug_DEMCR_TRCENA_Msk);
+  SET_BIT(DWT->CTRL, DWT_CTRL_CYCCNTENA_Msk);
+  __DSB();
+  __ISB();
+
+  saved_ccmr1 = tim->CCMR1;
+  saved_ccmr2 = tim->CCMR2;
+  /* Active-high CHx/CHxN: forced-low OCREF drives high sides low and
+     complementary low sides high, with the configured dead time. */
+  MODIFY_REG(tim->CCMR1, TIM_CCMR1_OC1M | TIM_CCMR1_OC2M,
+             TIM_OCMODE_FORCED_INACTIVE | (TIM_OCMODE_FORCED_INACTIVE << 8U));
+  MODIFY_REG(tim->CCMR2, TIM_CCMR2_OC3M, TIM_OCMODE_FORCED_INACTIVE);
+  __HAL_TIM_SET_COUNTER(motor_timer, 0U);
+  tim->EGR = TIM_EGR_UG;
+  __HAL_TIM_CLEAR_FLAG(motor_timer, TIM_FLAG_UPDATE);
+  SET_BIT(tim->CCER, MOTOR_CONTROL_OUTPUT_ENABLE_MASK);
+  SET_BIT(tim->CR1, TIM_CR1_CEN);
+  SET_BIT(tim->BDTR, TIM_BDTR_MOE);
+  MotorControl_DelayMicroseconds(MOTOR_CONTROL_BOOTSTRAP_CHARGE_US);
+
+  /* All six outputs OFF before restoring PWM modes or clearing faults. */
+  MotorControl_Stop();
+  tim->CCMR1 = saved_ccmr1;
+  tim->CCMR2 = saved_ccmr2;
+  result = STSPIN32G4_ClearFaults(gate_driver_i2c);
+  if (result != HAL_OK)
+  {
+    goto i2c_error;
+  }
+  /* Datasheet tFAULT,reset = 160 us. Avoid a full SysTick delay here
+     to minimize the interval between bootstrap charging and PWM. */
+  MotorControl_DelayMicroseconds(200U);
+  result = STSPIN32G4_ReadStatus(gate_driver_i2c, &status);
+  if (result != HAL_OK)
+  {
+    goto i2c_error;
+  }
+  nfault = HAL_GPIO_ReadPin(GPIOE, GPIO_PIN_15);
+  if (STSPIN32G4_StatusHasFault(status) || (nfault == GPIO_PIN_RESET))
+  {
+    printf("PWM start blocked after bootstrap/CLEAR: STATUS=0x%02X, nFAULT=%u\r\n",
+           status, (unsigned int)(nfault == GPIO_PIN_SET));
+    return HAL_ERROR;
+  }
+  return HAL_OK;
+
+i2c_error:
+  printf("PWM start blocked: gate-driver I2C status=%d, error=0x%08lX\r\n",
+         (int)result, (unsigned long)HAL_I2C_GetError(gate_driver_i2c));
+  return result;
+}
+
+static HAL_StatusTypeDef MotorControl_StartAtMidpoint(void)
+{
+  TIM_TypeDef *tim = motor_timer->Instance;
+  uint32_t interrupt_state;
+  HAL_StatusTypeDef result = MotorControl_PreparePwmStart();
+
+  if (result != HAL_OK)
+  {
+    return result;
+  }
+  interrupt_state = __get_PRIMASK();
 
   __disable_irq();
 
@@ -204,6 +310,7 @@ static void MotorControl_StartAtMidpoint(void)
 
   selected_offset_percent = 0.0f;
   outputs_enabled = true;
+  return HAL_OK;
 }
 
 static uint32_t MotorControl_RunDutyX10(uint32_t rpm)
@@ -397,7 +504,13 @@ static void MotorControl_StartSixStep(MotorControlDirection direction,
 {
   TIM_TypeDef *tim = motor_timer->Instance;
   const uint32_t target_duty_x10 = MotorControl_RunDutyX10(requested_rpm);
-  uint32_t interrupt_state = __get_PRIMASK();
+  uint32_t interrupt_state;
+
+  if (MotorControl_PreparePwmStart() != HAL_OK)
+  {
+    return;
+  }
+  interrupt_state = __get_PRIMASK();
 
   __disable_irq();
   CLEAR_BIT(tim->BDTR, TIM_BDTR_MOE);
@@ -572,9 +685,10 @@ static void MotorControl_ApplyOffset(MotorControlPhase phase, float offset_perce
          offset_percent);
 }
 
-HAL_StatusTypeDef MotorControl_Init(TIM_HandleTypeDef *htim)
+HAL_StatusTypeDef MotorControl_Init(TIM_HandleTypeDef *htim,
+                                     I2C_HandleTypeDef *hi2c)
 {
-  if ((htim == NULL) ||
+  if ((htim == NULL) || (hi2c == NULL) ||
       !IS_TIM_CCXN_INSTANCE(htim->Instance, TIM_CHANNEL_3) ||
       (MOTOR_CONTROL_MAX_DUTY_OFFSET_PERCENT <= 0.0f) ||
       (MOTOR_CONTROL_MAX_DUTY_OFFSET_PERCENT >= 50.0f) ||
@@ -585,6 +699,7 @@ HAL_StatusTypeDef MotorControl_Init(TIM_HandleTypeDef *htim)
   }
 
   motor_timer = htim;
+  gate_driver_i2c = hi2c;
   control_tick_hz = MotorControl_GetControlTickHz();
   if (control_tick_hz == 0U)
   {
@@ -592,10 +707,9 @@ HAL_StatusTypeDef MotorControl_Init(TIM_HandleTypeDef *htim)
   }
 
   selected_phase = MOTOR_CONTROL_PHASE_U;
-  MotorControl_StartAtMidpoint();
   __HAL_TIM_CLEAR_FLAG(motor_timer, TIM_FLAG_UPDATE);
   __HAL_TIM_ENABLE_IT(motor_timer, TIM_IT_UPDATE);
-  return HAL_OK;
+  return MotorControl_StartAtMidpoint();
 }
 
 bool MotorControl_ProcessCommand(const char *command)
@@ -625,8 +739,10 @@ bool MotorControl_ProcessCommand(const char *command)
 
   if (MotorControl_IsCommand(command, "start"))
   {
-    MotorControl_StartAtMidpoint();
-    printf("PWM started: U=V=W=50.00 %%\r\n");
+    if (MotorControl_StartAtMidpoint() == HAL_OK)
+    {
+      printf("PWM started: U=V=W=50.00 %%\r\n");
+    }
     return true;
   }
 
