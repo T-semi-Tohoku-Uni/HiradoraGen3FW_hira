@@ -450,6 +450,9 @@ void CurrentSense_Task(void)
     return;
   }
 
+  /* The captured samples are now in RAM; keep the motor stopped while the
+   * comparatively slow CSV transfer is in progress. */
+  MotorControl_Stop();
   CurrentSense_BeginCsv();
 }
 
