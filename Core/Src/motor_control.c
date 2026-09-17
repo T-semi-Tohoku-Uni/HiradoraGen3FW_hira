@@ -363,6 +363,10 @@ static void MotorControl_ApplySixStepSector(uint8_t sector)
   TIM_TypeDef *tim = motor_timer->Instance;
   const uint32_t duty_x10 = MotorControl_SixStepDutyX10();
   const uint32_t pwm_compare = MotorControl_SixStepCompare(duty_x10);
+  /* Center both active phases around 50%, preserving the compare difference
+   * even when it is odd. Each phase uses complementary high/low-side PWM. */
+  const uint32_t low_compare = MotorControl_MidpointCompare() - (pwm_compare / 2U);
+  const uint32_t high_compare = low_compare + pwm_compare;
   uint32_t output_mask;
   uint32_t u_compare = 0U;
   uint32_t v_compare = 0U;
@@ -371,38 +375,44 @@ static void MotorControl_ApplySixStepSector(uint8_t sector)
 
   switch (sector)
   {
-    case 1U: /* U high, V low, W floating. */
-      u_compare = pwm_compare;
+    case 1U: /* U positive, V negative, W floating. */
+      u_compare = high_compare;
+      v_compare = low_compare;
       output_mask = MOTOR_CONTROL_PHASE_U_OUTPUTS |
                     MOTOR_CONTROL_PHASE_V_OUTPUTS;
       break;
 
-    case 2U: /* U high, W low, V floating. */
-      u_compare = pwm_compare;
+    case 2U: /* U positive, W negative, V floating. */
+      u_compare = high_compare;
+      w_compare = low_compare;
       output_mask = MOTOR_CONTROL_PHASE_U_OUTPUTS |
                     MOTOR_CONTROL_PHASE_W_OUTPUTS;
       break;
 
-    case 3U: /* V high, W low, U floating. */
-      v_compare = pwm_compare;
+    case 3U: /* V positive, W negative, U floating. */
+      v_compare = high_compare;
+      w_compare = low_compare;
       output_mask = MOTOR_CONTROL_PHASE_V_OUTPUTS |
                     MOTOR_CONTROL_PHASE_W_OUTPUTS;
       break;
 
-    case 4U: /* V high, U low, W floating. */
-      v_compare = pwm_compare;
+    case 4U: /* V positive, U negative, W floating. */
+      v_compare = high_compare;
+      u_compare = low_compare;
       output_mask = MOTOR_CONTROL_PHASE_V_OUTPUTS |
                     MOTOR_CONTROL_PHASE_U_OUTPUTS;
       break;
 
-    case 5U: /* W high, U low, V floating. */
-      w_compare = pwm_compare;
+    case 5U: /* W positive, U negative, V floating. */
+      w_compare = high_compare;
+      u_compare = low_compare;
       output_mask = MOTOR_CONTROL_PHASE_W_OUTPUTS |
                     MOTOR_CONTROL_PHASE_U_OUTPUTS;
       break;
 
-    case 6U: /* W high, V low, U floating. */
-      w_compare = pwm_compare;
+    case 6U: /* W positive, V negative, U floating. */
+      w_compare = high_compare;
+      v_compare = low_compare;
       output_mask = MOTOR_CONTROL_PHASE_W_OUTPUTS |
                     MOTOR_CONTROL_PHASE_V_OUTPUTS;
       break;
