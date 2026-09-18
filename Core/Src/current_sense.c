@@ -13,6 +13,7 @@
 
 #define CURRENT_SENSE_CONSOLE_FLUSH_TIMEOUT_MS 15000U
 #define CURRENT_SENSE_ACQUISITION_TIMEOUT_MS 1000U
+#define CURRENT_SENSE_OFFSET_SAMPLE_COUNT 1000U
 #define CURRENT_SENSE_SLAVE_WAIT_LOOP_LIMIT 1024U
 #define CURRENT_SENSE_SECTOR_BITS 3U
 #define CURRENT_SENSE_SECTOR_BUFFER_SIZE \
@@ -51,6 +52,11 @@ static volatile CurrentSenseState current_state = CURRENT_SENSE_UNINITIALIZED;
 static uint32_t acquisition_start_tick;
 static uint32_t transmit_sample_index;
 static bool timer_started_for_capture;
+static uint32_t acquisition_sample_count;
+static float offsets[4]; /* U1, V, U2, W, in ADC counts. */
+
+_Static_assert(CURRENT_SENSE_OFFSET_SAMPLE_COUNT <= CURRENT_SENSE_SAMPLE_COUNT,
+               "Offset samples must fit in the capture buffer");
 
 /* Store four 12-bit values in six bytes so 4000 samples fit in 32 KiB RAM. */
 static void CurrentSense_StoreSample(CurrentSenseSample *sample,
@@ -167,7 +173,7 @@ static bool CurrentSense_IsCommand(const char *text, const char *expected)
   return ((*text == '\0') && (*expected == '\0'));
 }
 
-static HAL_StatusTypeDef CurrentSense_StartAcquisition(void)
+static HAL_StatusTypeDef CurrentSense_StartAcquisition(uint32_t sample_count)
 {
   HAL_StatusTypeDef status;
 
@@ -202,6 +208,7 @@ static HAL_StatusTypeDef CurrentSense_StartAcquisition(void)
   }
 
   captured_sample_count = 0U;
+  acquisition_sample_count = sample_count;
   memset(sample_sectors, 0, sizeof(sample_sectors));
   current_state = CURRENT_SENSE_ACQUIRING;
 
@@ -255,7 +262,7 @@ static HAL_StatusTypeDef CurrentSense_StopAcquisition(void)
 static void CurrentSense_BeginCsv(void)
 {
   static const char csv_header[] =
-    "sample,sector,u1_raw,v_raw,u2_raw,w_raw\r\n";
+    "sample,sector,u1_delta,v_delta,u2_delta,w_delta\r\n";
 
   transmit_sample_index = 0U;
   (void)Console_Write(csv_header, sizeof(csv_header) - 1U);
@@ -263,20 +270,20 @@ static void CurrentSense_BeginCsv(void)
 
 static bool CurrentSense_SendNextCsvLine(void)
 {
-  char line[40];
+  char line[64];
 
   if (transmit_sample_index < CURRENT_SENSE_SAMPLE_COUNT)
   {
     const uint32_t index = transmit_sample_index;
     const int length = snprintf(line,
                                 sizeof(line),
-                                "%lu,%u,%u,%u,%u,%u\r\n",
+                                "%lu,%u,%.3f,%.3f,%.3f,%.3f\r\n",
                                 (unsigned long)index,
                                 (unsigned int)CurrentSense_GetSector(index),
-                                (unsigned int)CurrentSense_GetU1Raw(&samples[index]),
-                                (unsigned int)CurrentSense_GetVRaw(&samples[index]),
-                                (unsigned int)CurrentSense_GetU2Raw(&samples[index]),
-                                (unsigned int)CurrentSense_GetWRaw(&samples[index]));
+                                (double)((float)CurrentSense_GetU1Raw(&samples[index]) - offsets[0]),
+                                (double)((float)CurrentSense_GetVRaw(&samples[index]) - offsets[1]),
+                                (double)((float)CurrentSense_GetU2Raw(&samples[index]) - offsets[2]),
+                                (double)((float)CurrentSense_GetWRaw(&samples[index]) - offsets[3]));
 
     if ((length > 0) && ((size_t)length < sizeof(line)))
     {
@@ -289,6 +296,65 @@ static bool CurrentSense_SendNextCsvLine(void)
 
   (void)Console_Flush(CURRENT_SENSE_CONSOLE_FLUSH_TIMEOUT_MS);
   return true;
+}
+
+/* Called only at startup, before MotorControl_Init enables any PWM pins. */
+static HAL_StatusTypeDef CurrentSense_CalibrateOffset(void)
+{
+  uint32_t sums[4] = {0U};
+  HAL_StatusTypeDef status;
+
+  HAL_Delay(5U); /* Allow the analog path to settle after OPAMP startup. */
+  status = CurrentSense_StartAcquisition(CURRENT_SENSE_OFFSET_SAMPLE_COUNT);
+  if (status != HAL_OK)
+  {
+    current_state = CURRENT_SENSE_UNINITIALIZED;
+    return status;
+  }
+
+  while (current_state == CURRENT_SENSE_ACQUIRING)
+  {
+    if ((HAL_GetTick() - acquisition_start_tick) >=
+        CURRENT_SENSE_ACQUISITION_TIMEOUT_MS)
+    {
+      status = HAL_TIMEOUT;
+      break;
+    }
+  }
+  if ((status == HAL_OK) && (current_state != CURRENT_SENSE_DATA_READY))
+  {
+    status = HAL_ERROR;
+  }
+  /* Prevent callbacks from writing the buffer during cleanup. */
+  current_state = CURRENT_SENSE_UNINITIALIZED;
+  if (CurrentSense_StopAcquisition() != HAL_OK)
+  {
+    status = HAL_ERROR;
+  }
+  if (status != HAL_OK)
+  {
+    printf("ADC offset calibration failed: HAL status=%d, samples=%lu\r\n",
+           (int)status, (unsigned long)captured_sample_count);
+    return status;
+  }
+
+  for (uint32_t i = 0U; i < CURRENT_SENSE_OFFSET_SAMPLE_COUNT; i++)
+  {
+    sums[0] += CurrentSense_GetU1Raw(&samples[i]);
+    sums[1] += CurrentSense_GetVRaw(&samples[i]);
+    sums[2] += CurrentSense_GetU2Raw(&samples[i]);
+    sums[3] += CurrentSense_GetWRaw(&samples[i]);
+  }
+  for (uint32_t i = 0U; i < 4U; i++)
+  {
+    offsets[i] = (float)sums[i] / (float)CURRENT_SENSE_OFFSET_SAMPLE_COUNT;
+  }
+  printf("ADC offset calibrated: %u samples, U1=%.3f, V=%.3f, U2=%.3f, W=%.3f\r\n",
+         (unsigned int)CURRENT_SENSE_OFFSET_SAMPLE_COUNT,
+         (double)offsets[0], (double)offsets[1],
+         (double)offsets[2], (double)offsets[3]);
+  current_state = CURRENT_SENSE_IDLE;
+  return HAL_OK;
 }
 
 HAL_StatusTypeDef CurrentSense_Init(ADC_HandleTypeDef *master_adc,
@@ -310,6 +376,12 @@ HAL_StatusTypeDef CurrentSense_Init(ADC_HandleTypeDef *master_adc,
   adc_master = master_adc;
   adc_slave = slave_adc;
   sample_timer = trigger_timer;
+
+  if ((READ_BIT(sample_timer->Instance->CR1, TIM_CR1_CEN) != 0U) ||
+      (READ_BIT(sample_timer->Instance->CCER, CURRENT_SENSE_PWM_OUTPUT_MASK) != 0U))
+  {
+    return HAL_ERROR; /* Zero-current calibration requires disabled motor PWM. */
+  }
 
   if (HAL_ADCEx_Calibration_Start(adc_master, ADC_SINGLE_ENDED) != HAL_OK)
   {
@@ -339,7 +411,7 @@ HAL_StatusTypeDef CurrentSense_Init(ADC_HandleTypeDef *master_adc,
   transmit_sample_index = 0U;
   timer_started_for_capture = false;
   current_state = CURRENT_SENSE_IDLE;
-  return HAL_OK;
+  return CurrentSense_CalibrateOffset();
 }
 
 bool CurrentSense_ProcessCommand(const char *command)
@@ -362,7 +434,7 @@ bool CurrentSense_ProcessCommand(const char *command)
     return true;
   }
 
-  status = CurrentSense_StartAcquisition();
+  status = CurrentSense_StartAcquisition(CURRENT_SENSE_SAMPLE_COUNT);
   if (status != HAL_OK)
   {
     printf("ADC capture start failed: HAL status=%d\r\n", (int)status);
@@ -498,7 +570,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
   }
 
   index = captured_sample_count;
-  if (index >= CURRENT_SENSE_SAMPLE_COUNT)
+  if (index >= acquisition_sample_count)
   {
     return;
   }
@@ -522,7 +594,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
   index++;
   captured_sample_count = index;
 
-  if (index >= CURRENT_SENSE_SAMPLE_COUNT)
+  if (index >= acquisition_sample_count)
   {
     /* Main context performs the blocking HAL stop calls and CSV output. */
     __HAL_ADC_DISABLE_IT(adc_master, ADC_IT_JEOC | ADC_IT_JEOS);
