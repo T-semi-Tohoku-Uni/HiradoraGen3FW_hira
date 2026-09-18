@@ -24,6 +24,7 @@
 #include "console.h"
 #include "current_sense.h"
 #include "motor_control.h"
+#include "ntc.h"
 #include "stspin32g4.h"
 #include <ctype.h>
 #include <stdio.h>
@@ -241,6 +242,8 @@ int main(void)
     Error_Handler();
   }
 
+  NTC_Init(&hadc2);
+
   /* The internal VCC buck soft-start is 3.3 ms according to the datasheet. */
   HAL_Delay(5U);
   if (MotorControl_Init(&htim1, &hi2c3) != HAL_OK)
@@ -252,7 +255,7 @@ int main(void)
     printf("TIM1 three-phase PWM started at U=V=W=50.00 %%\r\n");
   }
   printf("Command: <offset>, u/v/w <offset>, mid, stop, start, "
-         "run cw/ccw <rpm>, status, adc, fault, fault clear\r\n");
+         "run cw/ccw <rpm>, status, adc, ntc, ntc stop, fault, fault clear\r\n");
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -263,6 +266,7 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     CurrentSense_Task();
+    NTC_Task();
 
     if (Console_ReadLine(motor_command, sizeof(motor_command)))
     {
@@ -274,6 +278,7 @@ int main(void)
         }
       }
       else if (!ProcessGateDriverFaultCommand(motor_command) &&
+               !NTC_ProcessCommand(motor_command) &&
                !CurrentSense_ProcessCommand(motor_command))
       {
         (void)MotorControl_ProcessCommand(motor_command);
@@ -425,6 +430,7 @@ static void MX_ADC2_Init(void)
   /* USER CODE END ADC2_Init 0 */
 
   ADC_InjectionConfTypeDef sConfigInjected = {0};
+  ADC_ChannelConfTypeDef sConfig = {0};
 
   /* USER CODE BEGIN ADC2_Init 1 */
 
@@ -474,6 +480,19 @@ static void MX_ADC2_Init(void)
   sConfigInjected.InjectedChannel = ADC_CHANNEL_VOPAMP3_ADC2;
   sConfigInjected.InjectedRank = ADC_INJECTED_RANK_2;
   if (HAL_ADCEx_InjectedConfigChannel(&hadc2, &sConfigInjected) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Regular Channel
+  */
+  sConfig.Channel = ADC_CHANNEL_5;
+  sConfig.Rank = ADC_REGULAR_RANK_1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_247CYCLES_5;
+  sConfig.SingleDiff = ADC_SINGLE_ENDED;
+  sConfig.OffsetNumber = ADC_OFFSET_NONE;
+  sConfig.Offset = 0;
+  if (HAL_ADC_ConfigChannel(&hadc2, &sConfig) != HAL_OK)
   {
     Error_Handler();
   }
@@ -867,9 +886,9 @@ static void MX_GPIO_Init(void)
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOF_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOE_CLK_ENABLE();
-  __HAL_RCC_GPIOC_CLK_ENABLE();
 
   /*Configure GPIO pin : PE15 */
   GPIO_InitStruct.Pin = GPIO_PIN_15;
