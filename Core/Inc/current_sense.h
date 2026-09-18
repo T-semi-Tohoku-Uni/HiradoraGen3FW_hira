@@ -17,8 +17,10 @@ extern "C" {
  * ADC1 is expected to be the master and ADC2 the slave of the injected
  * simultaneous conversion configured by CubeMX.
  * Call before enabling motor PWM, with zero phase current. Blocks until
- * 1000 sample sets are captured (or timeout). CSV reports raw minus the
- * per-rank mean in ADC counts; offsets are kept in RAM until reset.
+ * 64 VREFINT readings and 1000 zero-current sample sets are captured
+ * (or timeout). ADC1 regular rank 1 must be VREFINT with adequate sampling
+ * time. Raw samples remain packed in RAM; CSV converts them to amperes
+ * using the per-rank offset and startup VREF+ calibration.
  */
 HAL_StatusTypeDef CurrentSense_Init(ADC_HandleTypeDef *master_adc,
                                     ADC_HandleTypeDef *slave_adc,

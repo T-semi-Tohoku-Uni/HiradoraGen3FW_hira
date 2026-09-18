@@ -14,6 +14,13 @@
 #define CURRENT_SENSE_CONSOLE_FLUSH_TIMEOUT_MS 15000U
 #define CURRENT_SENSE_ACQUISITION_TIMEOUT_MS 1000U
 #define CURRENT_SENSE_OFFSET_SAMPLE_COUNT 1000U
+#define CURRENT_SENSE_VREF_SAMPLE_COUNT 64U
+#define CURRENT_SENSE_VREF_TIMEOUT_MS 10U
+#define CURRENT_SENSE_SHUNT_OHMS 0.001f
+#define CURRENT_SENSE_PGA_GAIN 8.0f
+/* 1.5k series, with 22k to 3.3V and 22k to GND: 11k / 12.5k. */
+#define CURRENT_SENSE_INPUT_ATTENUATION (11.0f / 12.5f)
+#define CURRENT_SENSE_ADC_FULL_SCALE 4095U
 #define CURRENT_SENSE_SLAVE_WAIT_LOOP_LIMIT 1024U
 #define CURRENT_SENSE_SECTOR_BITS 3U
 #define CURRENT_SENSE_SECTOR_BUFFER_SIZE \
@@ -54,6 +61,7 @@ static uint32_t transmit_sample_index;
 static bool timer_started_for_capture;
 static uint32_t acquisition_sample_count;
 static float offsets[4]; /* U1, V, U2, W, in ADC counts. */
+static float amps_per_count;
 
 _Static_assert(CURRENT_SENSE_OFFSET_SAMPLE_COUNT <= CURRENT_SENSE_SAMPLE_COUNT,
                "Offset samples must fit in the capture buffer");
@@ -262,7 +270,7 @@ static HAL_StatusTypeDef CurrentSense_StopAcquisition(void)
 static void CurrentSense_BeginCsv(void)
 {
   static const char csv_header[] =
-    "sample,sector,u1_delta,v_delta,u2_delta,w_delta\r\n";
+    "sample,sector,u1_a,v_a,u2_a,w_a\r\n";
 
   transmit_sample_index = 0U;
   (void)Console_Write(csv_header, sizeof(csv_header) - 1U);
@@ -280,10 +288,10 @@ static bool CurrentSense_SendNextCsvLine(void)
                                 "%lu,%u,%.3f,%.3f,%.3f,%.3f\r\n",
                                 (unsigned long)index,
                                 (unsigned int)CurrentSense_GetSector(index),
-                                (double)((float)CurrentSense_GetU1Raw(&samples[index]) - offsets[0]),
-                                (double)((float)CurrentSense_GetVRaw(&samples[index]) - offsets[1]),
-                                (double)((float)CurrentSense_GetU2Raw(&samples[index]) - offsets[2]),
-                                (double)((float)CurrentSense_GetWRaw(&samples[index]) - offsets[3]));
+                                (double)(((float)CurrentSense_GetU1Raw(&samples[index]) - offsets[0]) * amps_per_count),
+                                (double)(((float)CurrentSense_GetVRaw(&samples[index]) - offsets[1]) * amps_per_count),
+                                (double)(((float)CurrentSense_GetU2Raw(&samples[index]) - offsets[2]) * amps_per_count),
+                                (double)(((float)CurrentSense_GetWRaw(&samples[index]) - offsets[3]) * amps_per_count));
 
     if ((length > 0) && ((size_t)length < sizeof(line)))
     {
@@ -296,6 +304,97 @@ static bool CurrentSense_SendNextCsvLine(void)
 
   (void)Console_Flush(CURRENT_SENSE_CONSOLE_FLUSH_TIMEOUT_MS);
   return true;
+}
+
+/* ADC1 regular rank 1 is VREFINT (247.5 cycles), configured by CubeMX.
+ * Run before injected capture and before PWM/NTC startup. */
+static HAL_StatusTypeDef CurrentSense_CalibrateScale(void)
+{
+  const uint32_t factory_cal = *VREFINT_CAL_ADDR;
+  uint32_t sum = 0U;
+  HAL_StatusTypeDef status;
+
+  if ((factory_cal == 0U) || (factory_cal > CURRENT_SENSE_ADC_FULL_SCALE))
+  {
+    printf("ADC VREFINT factory calibration is invalid\r\n");
+    return HAL_ERROR;
+  }
+
+  /* Enable ADC, then allow >12 us for the VREFINT buffer to settle.
+   * Discard this first conversion, which may precede stabilization. */
+  status = HAL_ADC_Start(adc_master);
+  if (status == HAL_OK)
+  {
+    HAL_Delay(1U);
+    status = HAL_ADC_PollForConversion(adc_master, CURRENT_SENSE_VREF_TIMEOUT_MS);
+    if (status == HAL_OK)
+    {
+      (void)HAL_ADC_GetValue(adc_master);
+    }
+  }
+
+  for (uint32_t i = 0U; (i < CURRENT_SENSE_VREF_SAMPLE_COUNT) && (status == HAL_OK); i++)
+  {
+    uint32_t raw = 0U;
+    /* ES0431 ADC inactivity workaround, as in NTC_Task: discard the
+     * first of two consecutive conversions and retain only the second. */
+    for (uint32_t pass = 0U; pass < 2U; pass++)
+    {
+      status = HAL_ADC_Start(adc_master);
+      if (status != HAL_OK)
+      {
+        break;
+      }
+      status = HAL_ADC_PollForConversion(adc_master, CURRENT_SENSE_VREF_TIMEOUT_MS);
+      if (status != HAL_OK)
+      {
+        break;
+      }
+      raw = HAL_ADC_GetValue(adc_master);
+    }
+    if (status == HAL_OK)
+    {
+      if ((raw == 0U) || (raw >= CURRENT_SENSE_ADC_FULL_SCALE))
+      {
+        status = HAL_ERROR;
+      }
+      else
+      {
+        sum += raw;
+      }
+    }
+  }
+
+  /* Stop only the regular group on this shared ADC. */
+  if (HAL_ADCEx_RegularStop(adc_master) != HAL_OK)
+  {
+    status = HAL_ERROR;
+  }
+  if (status != HAL_OK)
+  {
+    printf("ADC VREFINT calibration failed: HAL status=%d\r\n", (int)status);
+    return status;
+  }
+
+  const float average = (float)sum / (float)CURRENT_SENSE_VREF_SAMPLE_COUNT;
+  /* Same factory-calibration ratio as __HAL_ADC_CALC_VREFANALOG_VOLTAGE,
+   * retaining the fractional average instead of rounding to integer counts. */
+  const float vref_volts = ((float)VREFINT_CAL_VREF / 1000.0f) *
+                           (float)factory_cal / average;
+  if ((vref_volts < 1.62f) || (vref_volts > 3.6f))
+  {
+    printf("ADC VREFINT calibration out of range: VREF+=%.4f V\r\n",
+           (double)vref_volts);
+    return HAL_ERROR;
+  }
+  amps_per_count = vref_volts /
+    ((float)CURRENT_SENSE_ADC_FULL_SCALE * CURRENT_SENSE_PGA_GAIN *
+     CURRENT_SENSE_INPUT_ATTENUATION * CURRENT_SENSE_SHUNT_OHMS);
+  printf("ADC scale calibrated: VREFINT=%.3f (%u samples), "
+         "VREF+=%.4f V, A/count=%.6f\r\n",
+         (double)average, (unsigned int)CURRENT_SENSE_VREF_SAMPLE_COUNT,
+         (double)vref_volts, (double)amps_per_count);
+  return HAL_OK;
 }
 
 /* Called only at startup, before MotorControl_Init enables any PWM pins. */
@@ -388,6 +487,10 @@ HAL_StatusTypeDef CurrentSense_Init(ADC_HandleTypeDef *master_adc,
     return HAL_ERROR;
   }
   if (HAL_ADCEx_Calibration_Start(adc_slave, ADC_SINGLE_ENDED) != HAL_OK)
+  {
+    return HAL_ERROR;
+  }
+  if (CurrentSense_CalibrateScale() != HAL_OK)
   {
     return HAL_ERROR;
   }
