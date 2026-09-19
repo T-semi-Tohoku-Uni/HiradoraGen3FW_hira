@@ -7,10 +7,10 @@
 
 #define NTC_SAMPLE_PERIOD_MS 10U
 #define NTC_REPORT_PERIOD_MS 1000U
-#define NTC_PULLDOWN_OHMS 4700.0f
+#define NTC_PULLDOWN_OHMS 33000.0f
 
 /* NCP18XH103F03RB: R25=10k, B25/50=3380K (constant-B approximation).
- * 3.3V -- NTC -- PC4 -- 4.7k -- GND; 33nF from PC4 to GND.
+ * 3.3V -- NTC -- PC4 -- 33k -- GND; 33nF from PC4 to GND.
  * Requires VREF+ to equal the divider supply voltage.
  */
 static ADC_HandleTypeDef *ntc_adc;
