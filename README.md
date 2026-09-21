@@ -1,1 +1,2 @@
-平ドラの電流検出を実験したり要素技術を試す場所。
+Hiradora第3世代のFWを試す場所。
+https://github.com/T-semi-Tohoku-Uni/hiradora_currentsense_test から移行。
