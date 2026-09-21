@@ -9,8 +9,6 @@ extern "C" {
 
 #include <stdbool.h>
 
-#define CURRENT_SENSE_SAMPLE_COUNT 4000U
-
 /**
  * @brief Prepare OPAMPs/ADCs and measure startup zero-current offsets.
  *
@@ -19,8 +17,8 @@ extern "C" {
  * Call before enabling motor PWM, with zero phase current. Blocks until
  * 64 VREFINT readings and 1000 zero-current sample sets are captured
  * (or timeout). ADC1 regular rank 1 must be VREFINT with adequate sampling
- * time. Raw samples remain packed in RAM; CSV converts them to amperes
- * using the per-rank offset and startup VREF+ calibration.
+ * time. Calibration accumulates sums without storing samples. Streaming formats calibrated currents in main context and sends
+ * standard Teleplot serial text over UART DMA.
  */
 HAL_StatusTypeDef CurrentSense_Init(ADC_HandleTypeDef *master_adc,
                                     ADC_HandleTypeDef *slave_adc,
@@ -30,15 +28,15 @@ HAL_StatusTypeDef CurrentSense_Init(ADC_HandleTypeDef *master_adc,
                                     TIM_HandleTypeDef *trigger_timer);
 
 /**
- * @brief Handle the "adc" serial command.
+ * @brief Handle adc [decimation], adc stop, and adc status.
  * @return true if the command belongs to this module, otherwise false.
  */
 bool CurrentSense_ProcessCommand(const char *command);
 
-/** @brief Stop a completed acquisition and transmit its CSV data. */
+/** @brief Service Teleplot DMA transmission and acquisition errors from main. */
 void CurrentSense_Task(void);
 
-/** @brief Return true while acquisition or CSV transmission is in progress. */
+/** @brief Return true while acquisition or DMA draining is in progress. */
 bool CurrentSense_IsBusy(void);
 
 #ifdef __cplusplus

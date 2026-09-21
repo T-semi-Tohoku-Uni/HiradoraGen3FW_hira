@@ -261,7 +261,7 @@ int main(void)
   }
   AS5047P_Init(&hspi1);
   printf("Command: <offset>, u/v/w <offset>, mid, stop, start, "
-         "run cw/ccw <rpm>, status, adc, ntc, ntc stop, angle, angle stop, fault, fault clear\r\n");
+         "run cw/ccw <rpm>, status, adc [decimation], adc stop, adc status, ntc, ntc stop, angle, angle stop, fault, fault clear\r\n");
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -279,9 +279,12 @@ int main(void)
     {
       if (CurrentSense_IsBusy())
       {
-        if (!MotorControl_ProcessStopCommand(motor_command))
-        {
-          printf("ADC capture/transfer is busy; only 'stop' is accepted\r\n");
+        if (CurrentSense_ProcessCommand(motor_command)) {
+          /* Logger commands remain available while streaming. */
+        } else if (MotorControl_ProcessStopCommand(motor_command)) {
+          (void)CurrentSense_ProcessCommand("adc stop");
+        } else {
+          printf("ADC logger busy; use 'adc stop', 'adc status' or 'stop'\r\n");
         }
       }
       else if (!ProcessGateDriverFaultCommand(motor_command) &&
@@ -886,7 +889,7 @@ static void MX_USART1_UART_Init(void)
 
   /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
-  huart1.Init.BaudRate = 115200;
+  huart1.Init.BaudRate = 921600;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;

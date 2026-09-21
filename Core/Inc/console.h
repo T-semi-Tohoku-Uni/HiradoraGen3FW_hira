@@ -41,6 +41,13 @@ void Console_Init(UART_HandleTypeDef *huart);
  */
 size_t Console_Write(const void *data, size_t length);
 
+/* Main context only. Borrow a complete text block until callback (ISR).
+ * Returns HAL_BUSY without waiting if text or another block is pending.
+ * The caller must keep data immutable until done(success) is called.
+ * Text queued during the transfer is sent after the complete block. */
+HAL_StatusTypeDef Console_TryTransmitBlock(const void *data, uint16_t length,
+                                          void (*done)(bool success));
+
 /**
  * @brief 受信した文字列をfloatへ変換し、指定された変数へ保存します。
  * @param received_value 正常に受信した値の保存先

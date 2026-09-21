@@ -1,17 +1,16 @@
 #include "current_sense.h"
 
-#include "console.h"
+#include "dma_logger.h"
 #include "motor_control.h"
 
 #include <ctype.h>
 #include <stdio.h>
-#include <string.h>
+#include <stdlib.h>
 
 #define CURRENT_SENSE_PWM_OUTPUT_MASK                                  \
   (TIM_CCER_CC1E | TIM_CCER_CC1NE | TIM_CCER_CC2E | TIM_CCER_CC2NE | \
    TIM_CCER_CC3E | TIM_CCER_CC3NE)
 
-#define CURRENT_SENSE_CONSOLE_FLUSH_TIMEOUT_MS 15000U
 #define CURRENT_SENSE_ACQUISITION_TIMEOUT_MS 1000U
 #define CURRENT_SENSE_OFFSET_SAMPLE_COUNT 1000U
 #define CURRENT_SENSE_VREF_SAMPLE_COUNT 64U
@@ -22,23 +21,6 @@
 #define CURRENT_SENSE_INPUT_ATTENUATION (11.0f / 12.5f)
 #define CURRENT_SENSE_ADC_FULL_SCALE 4095U
 #define CURRENT_SENSE_SLAVE_WAIT_LOOP_LIMIT 1024U
-#define CURRENT_SENSE_SECTOR_BITS 3U
-#define CURRENT_SENSE_SECTOR_BUFFER_SIZE \
-  ((CURRENT_SENSE_SAMPLE_COUNT * CURRENT_SENSE_SECTOR_BITS + 7U) / 8U)
-
-typedef struct
-{
-  uint8_t byte0;
-  uint8_t byte1;
-  uint8_t byte2;
-  uint8_t byte3;
-  uint8_t byte4;
-  uint8_t byte5;
-} CurrentSenseSample;
-
-_Static_assert(sizeof(CurrentSenseSample) == 6U,
-               "CurrentSenseSample must remain packed to six bytes");
-
 typedef enum
 {
   CURRENT_SENSE_UNINITIALIZED = 0,
@@ -52,93 +34,15 @@ typedef enum
 static ADC_HandleTypeDef *adc_master;
 static ADC_HandleTypeDef *adc_slave;
 static TIM_HandleTypeDef *sample_timer;
-static CurrentSenseSample samples[CURRENT_SENSE_SAMPLE_COUNT];
-static uint8_t sample_sectors[CURRENT_SENSE_SECTOR_BUFFER_SIZE];
+static volatile uint32_t offset_sums[4];
+static volatile uint32_t last_sample_tick;
 static volatile uint32_t captured_sample_count;
 static volatile CurrentSenseState current_state = CURRENT_SENSE_UNINITIALIZED;
 static uint32_t acquisition_start_tick;
-static uint32_t transmit_sample_index;
 static bool timer_started_for_capture;
 static uint32_t acquisition_sample_count;
 static float offsets[4]; /* U1, V, U2, W, in ADC counts. */
 static float amps_per_count;
-
-_Static_assert(CURRENT_SENSE_OFFSET_SAMPLE_COUNT <= CURRENT_SENSE_SAMPLE_COUNT,
-               "Offset samples must fit in the capture buffer");
-
-/* Store four 12-bit values in six bytes so 4000 samples fit in 32 KiB RAM. */
-static void CurrentSense_StoreSample(CurrentSenseSample *sample,
-                                     uint16_t u1_raw,
-                                     uint16_t v_raw,
-                                     uint16_t u2_raw,
-                                     uint16_t w_raw)
-{
-  sample->byte0 = (uint8_t)u1_raw;
-  sample->byte1 =
-    (uint8_t)((u1_raw >> 8U) | (uint16_t)(v_raw << 4U));
-  sample->byte2 = (uint8_t)(v_raw >> 4U);
-  sample->byte3 = (uint8_t)u2_raw;
-  sample->byte4 =
-    (uint8_t)((u2_raw >> 8U) | (uint16_t)(w_raw << 4U));
-  sample->byte5 = (uint8_t)(w_raw >> 4U);
-}
-
-static uint16_t CurrentSense_GetU1Raw(const CurrentSenseSample *sample)
-{
-  return (uint16_t)((uint16_t)sample->byte0 |
-                    ((uint16_t)(sample->byte1 & 0x0FU) << 8U));
-}
-
-static uint16_t CurrentSense_GetVRaw(const CurrentSenseSample *sample)
-{
-  return (uint16_t)(((uint16_t)sample->byte1 >> 4U) |
-                    ((uint16_t)sample->byte2 << 4U));
-}
-
-static uint16_t CurrentSense_GetWRaw(const CurrentSenseSample *sample)
-{
-  return (uint16_t)(((uint16_t)sample->byte4 >> 4U) |
-                    ((uint16_t)sample->byte5 << 4U));
-}
-
-static uint16_t CurrentSense_GetU2Raw(const CurrentSenseSample *sample)
-{
-  return (uint16_t)((uint16_t)sample->byte3 |
-                    ((uint16_t)(sample->byte4 & 0x0FU) << 8U));
-}
-
-static void CurrentSense_StoreSector(uint32_t index, uint8_t sector)
-{
-  const uint32_t bit_index = index * CURRENT_SENSE_SECTOR_BITS;
-  const uint32_t byte_index = bit_index / 8U;
-  const uint32_t bit_offset = bit_index % 8U;
-  const uint16_t packed_sector =
-    (uint16_t)((uint16_t)(sector & 0x07U) << bit_offset);
-
-  sample_sectors[byte_index] |= (uint8_t)packed_sector;
-  if ((bit_offset > 5U) &&
-      ((byte_index + 1U) < CURRENT_SENSE_SECTOR_BUFFER_SIZE))
-  {
-    sample_sectors[byte_index + 1U] |= (uint8_t)(packed_sector >> 8U);
-  }
-}
-
-static uint8_t CurrentSense_GetSector(uint32_t index)
-{
-  const uint32_t bit_index = index * CURRENT_SENSE_SECTOR_BITS;
-  const uint32_t byte_index = bit_index / 8U;
-  const uint32_t bit_offset = bit_index % 8U;
-  uint16_t packed_sector = sample_sectors[byte_index];
-
-  if ((bit_offset > 5U) &&
-      ((byte_index + 1U) < CURRENT_SENSE_SECTOR_BUFFER_SIZE))
-  {
-    packed_sector |= (uint16_t)((uint16_t)sample_sectors[byte_index + 1U]
-                                << 8U);
-  }
-
-  return (uint8_t)((packed_sector >> bit_offset) & 0x07U);
-}
 
 static void CurrentSense_DisableTrigger(void)
 {
@@ -185,13 +89,6 @@ static HAL_StatusTypeDef CurrentSense_StartAcquisition(uint32_t sample_count)
 {
   HAL_StatusTypeDef status;
 
-  /* Keep prior console messages outside the CSV response. */
-  if (Console_Flush(1000U) != HAL_OK)
-  {
-    printf("ADC capture could not flush the console\r\n");
-    return HAL_ERROR;
-  }
-
   timer_started_for_capture =
     (READ_BIT(sample_timer->Instance->CR1, TIM_CR1_CEN) == 0U);
 
@@ -217,7 +114,7 @@ static HAL_StatusTypeDef CurrentSense_StartAcquisition(uint32_t sample_count)
 
   captured_sample_count = 0U;
   acquisition_sample_count = sample_count;
-  memset(sample_sectors, 0, sizeof(sample_sectors));
+  last_sample_tick = HAL_GetTick();
   current_state = CURRENT_SENSE_ACQUIRING;
 
   /*
@@ -265,45 +162,6 @@ static HAL_StatusTypeDef CurrentSense_StopAcquisition(void)
   }
 
   return result;
-}
-
-static void CurrentSense_BeginCsv(void)
-{
-  static const char csv_header[] =
-    "sample,sector,u1_a,v_a,u2_a,w_a\r\n";
-
-  transmit_sample_index = 0U;
-  (void)Console_Write(csv_header, sizeof(csv_header) - 1U);
-}
-
-static bool CurrentSense_SendNextCsvLine(void)
-{
-  char line[64];
-
-  if (transmit_sample_index < CURRENT_SENSE_SAMPLE_COUNT)
-  {
-    const uint32_t index = transmit_sample_index;
-    const int length = snprintf(line,
-                                sizeof(line),
-                                "%lu,%u,%.3f,%.3f,%.3f,%.3f\r\n",
-                                (unsigned long)index,
-                                (unsigned int)CurrentSense_GetSector(index),
-                                (double)(((float)CurrentSense_GetU1Raw(&samples[index]) - offsets[0]) * amps_per_count),
-                                (double)(((float)CurrentSense_GetVRaw(&samples[index]) - offsets[1]) * amps_per_count),
-                                (double)(((float)CurrentSense_GetU2Raw(&samples[index]) - offsets[2]) * amps_per_count),
-                                (double)(((float)CurrentSense_GetWRaw(&samples[index]) - offsets[3]) * amps_per_count));
-
-    if ((length > 0) && ((size_t)length < sizeof(line)))
-    {
-      (void)Console_Write(line, (size_t)length);
-    }
-
-    transmit_sample_index++;
-    return false;
-  }
-
-  (void)Console_Flush(CURRENT_SENSE_CONSOLE_FLUSH_TIMEOUT_MS);
-  return true;
 }
 
 /* ADC1 regular rank 1 is VREFINT (247.5 cycles), configured by CubeMX.
@@ -400,7 +258,7 @@ static HAL_StatusTypeDef CurrentSense_CalibrateScale(void)
 /* Called only at startup, before MotorControl_Init enables any PWM pins. */
 static HAL_StatusTypeDef CurrentSense_CalibrateOffset(void)
 {
-  uint32_t sums[4] = {0U};
+  for (unsigned int i = 0U; i < 4U; i++) offset_sums[i] = 0U;
   HAL_StatusTypeDef status;
 
   HAL_Delay(5U); /* Allow the analog path to settle after OPAMP startup. */
@@ -437,16 +295,9 @@ static HAL_StatusTypeDef CurrentSense_CalibrateOffset(void)
     return status;
   }
 
-  for (uint32_t i = 0U; i < CURRENT_SENSE_OFFSET_SAMPLE_COUNT; i++)
-  {
-    sums[0] += CurrentSense_GetU1Raw(&samples[i]);
-    sums[1] += CurrentSense_GetVRaw(&samples[i]);
-    sums[2] += CurrentSense_GetU2Raw(&samples[i]);
-    sums[3] += CurrentSense_GetWRaw(&samples[i]);
-  }
   for (uint32_t i = 0U; i < 4U; i++)
   {
-    offsets[i] = (float)sums[i] / (float)CURRENT_SENSE_OFFSET_SAMPLE_COUNT;
+    offsets[i] = (float)offset_sums[i] / (float)CURRENT_SENSE_OFFSET_SAMPLE_COUNT;
   }
   printf("ADC offset calibrated: %u samples, U1=%.3f, V=%.3f, U2=%.3f, W=%.3f\r\n",
          (unsigned int)CURRENT_SENSE_OFFSET_SAMPLE_COUNT,
@@ -511,129 +362,107 @@ HAL_StatusTypeDef CurrentSense_Init(ADC_HandleTypeDef *master_adc,
   }
 
   captured_sample_count = 0U;
-  transmit_sample_index = 0U;
   timer_started_for_capture = false;
   current_state = CURRENT_SENSE_IDLE;
   return CurrentSense_CalibrateOffset();
 }
 
+static void CurrentSense_EndStream(void)
+{
+  /* Stop ISR writes before sealing a partially filled block. */
+  current_state = CURRENT_SENSE_TRANSMITTING;
+  if (CurrentSense_StopAcquisition() != HAL_OK) {
+    printf("ADC stop failed; reinitialize before restarting\r\n");
+    current_state = CURRENT_SENSE_UNINITIALIZED;
+  }
+  DmaLogger_Stop();
+}
+
 bool CurrentSense_ProcessCommand(const char *command)
 {
-  HAL_StatusTypeDef status;
-
-  if ((command == NULL) || !CurrentSense_IsCommand(command, "adc"))
-  {
-    return false;
-  }
-
-  if (current_state == CURRENT_SENSE_UNINITIALIZED)
-  {
-    printf("ADC capture is not initialized\r\n");
+  if (command == NULL) return false;
+  command = CurrentSense_SkipSpaces(command);
+  if (tolower((unsigned char)command[0]) != 'a' ||
+      tolower((unsigned char)command[1]) != 'd' ||
+      tolower((unsigned char)command[2]) != 'c' ||
+      (command[3] != '\0' && !isspace((unsigned char)command[3]))) return false;
+  const char *argument = CurrentSense_SkipSpaces(command + 3);
+  if (CurrentSense_IsCommand(argument, "stop")) {
+    if (current_state == CURRENT_SENSE_ACQUIRING ||
+        current_state == CURRENT_SENSE_SYNC_ERROR) CurrentSense_EndStream();
     return true;
   }
-  if (current_state != CURRENT_SENSE_IDLE)
-  {
-    printf("ADC capture is busy\r\n");
+  if (CurrentSense_IsCommand(argument, "status")) {
+    const char *state = current_state == CURRENT_SENSE_ACQUIRING ? "streaming" :
+                        current_state == CURRENT_SENSE_TRANSMITTING ? "draining" :
+                        current_state == CURRENT_SENSE_IDLE ? "idle" :
+                        current_state == CURRENT_SENSE_UNINITIALIZED ? "uninitialized" : "error";
+    printf("ADC logger: %s, overrun=%lu\r\n",
+           state, (unsigned long)DmaLogger_Overruns());
     return true;
   }
-
-  status = CurrentSense_StartAcquisition(CURRENT_SENSE_SAMPLE_COUNT);
-  if (status != HAL_OK)
-  {
-    printf("ADC capture start failed: HAL status=%d\r\n", (int)status);
+  uint32_t decimation = DMA_LOGGER_DEFAULT_DECIMATION;
+  if (*argument != '\0') {
+    char *end;
+    const unsigned long value = strtoul(argument, &end, 10);
+    if (!isdigit((unsigned char)*argument) || value < 1UL || value > 1000UL ||
+        *CurrentSense_SkipSpaces(end) != '\0') {
+      printf("Usage: adc [1..1000], adc stop, adc status\r\n");
+      return true;
+    }
+    decimation = (uint32_t)value;
   }
-  else
-  {
-    printf("ADC capture started: %u samples\r\n",
-           (unsigned int)CURRENT_SENSE_SAMPLE_COUNT);
+  if (current_state == CURRENT_SENSE_UNINITIALIZED) {
+    printf("ADC logger is not initialized\r\n");
+    return true;
   }
-
+  if (current_state != CURRENT_SENSE_IDLE || DmaLogger_IsBusy()) {
+    printf("ADC logger busy; send 'adc stop' first\r\n");
+    return true;
+  }
+  /* TIM1 center-aligned counter: one rising CH4 trigger per full cycle. */
+  uint32_t timer_clock = HAL_RCC_GetPCLK2Freq();
+  if ((RCC->CFGR & RCC_CFGR_PPRE2) != 0U) timer_clock *= 2U;
+  const uint32_t period_ns = (uint32_t)(
+    (2000000000ULL * sample_timer->Instance->ARR *
+     (sample_timer->Instance->PSC + 1U)) / timer_clock);
+  DmaLogger_Start(decimation, period_ns, offsets, amps_per_count);
+  /* Zero sample limit selects continuous acquisition, not calibration. */
+  const HAL_StatusTypeDef status = CurrentSense_StartAcquisition(0U);
+  if (status != HAL_OK) {
+    DmaLogger_Stop();
+    printf("ADC logger start failed: HAL status=%d\r\n", (int)status);
+  } else {
+    printf("ADC DMA logger started: decimation=%lu, period_ns=%lu\r\n",
+           (unsigned long)decimation, (unsigned long)period_ns);
+  }
   return true;
 }
 
 void CurrentSense_Task(void)
 {
-  if (current_state == CURRENT_SENSE_SYNC_ERROR)
-  {
-    const uint32_t adc2_isr = adc_slave->Instance->ISR;
-    const uint32_t adc2_ier = adc_slave->Instance->IER;
-
-    current_state = CURRENT_SENSE_TRANSMITTING;
-    (void)CurrentSense_StopAcquisition();
-    printf("ADC capture synchronization failed: samples=%lu, "
-           "ADC2_ISR=0x%08lX, ADC2_IER=0x%08lX\r\n",
-           (unsigned long)captured_sample_count,
-           (unsigned long)adc2_isr,
-           (unsigned long)adc2_ier);
+  /* Read the ISR timestamp before the clock: an IRQ between these reads
+   * must not make an unsigned subtraction interpret a future tick as timeout. */
+  const uint32_t sample_tick = last_sample_tick;
+  if (current_state == CURRENT_SENSE_SYNC_ERROR ||
+      (current_state == CURRENT_SENSE_ACQUIRING &&
+       (uint32_t)(HAL_GetTick() - sample_tick) >=
+         CURRENT_SENSE_ACQUISITION_TIMEOUT_MS)) {
+    printf("ADC logger stopped: synchronization error or trigger timeout\r\n");
+    CurrentSense_EndStream();
+  }
+  DmaLogger_Task();
+  if (current_state == CURRENT_SENSE_TRANSMITTING && !DmaLogger_IsBusy()) {
     current_state = CURRENT_SENSE_IDLE;
-    return;
+    printf("ADC DMA logger stopped: overrun=%lu\r\n",
+           (unsigned long)DmaLogger_Overruns());
   }
-
-  if (current_state == CURRENT_SENSE_ACQUIRING)
-  {
-    if ((HAL_GetTick() - acquisition_start_tick) <
-        CURRENT_SENSE_ACQUISITION_TIMEOUT_MS)
-    {
-      return;
-    }
-
-    const uint32_t timer_count = sample_timer->Instance->CNT;
-    const uint32_t adc1_isr = adc_master->Instance->ISR;
-    const uint32_t adc1_cr = adc_master->Instance->CR;
-    const uint32_t adc1_ier = adc_master->Instance->IER;
-    const uint32_t adc2_isr = adc_slave->Instance->ISR;
-    const uint32_t adc2_cr = adc_slave->Instance->CR;
-    const uint32_t adc2_ier = adc_slave->Instance->IER;
-
-    current_state = CURRENT_SENSE_TRANSMITTING;
-    (void)CurrentSense_StopAcquisition();
-    printf("ADC capture timed out: samples=%lu, TIM1_CNT=%lu, "
-           "ADC1_ISR=0x%08lX, ADC1_CR=0x%08lX, ADC1_IER=0x%08lX, "
-           "ADC2_ISR=0x%08lX, ADC2_CR=0x%08lX, ADC2_IER=0x%08lX\r\n",
-           (unsigned long)captured_sample_count,
-           (unsigned long)timer_count,
-           (unsigned long)adc1_isr,
-           (unsigned long)adc1_cr,
-           (unsigned long)adc1_ier,
-           (unsigned long)adc2_isr,
-           (unsigned long)adc2_cr,
-           (unsigned long)adc2_ier);
-    current_state = CURRENT_SENSE_IDLE;
-    return;
-  }
-
-  if (current_state == CURRENT_SENSE_TRANSMITTING)
-  {
-    if (CurrentSense_SendNextCsvLine())
-    {
-      current_state = CURRENT_SENSE_IDLE;
-    }
-    return;
-  }
-
-  if (current_state != CURRENT_SENSE_DATA_READY)
-  {
-    return;
-  }
-
-  current_state = CURRENT_SENSE_TRANSMITTING;
-
-  if (CurrentSense_StopAcquisition() != HAL_OK)
-  {
-    printf("ADC capture stop failed\r\n");
-    current_state = CURRENT_SENSE_IDLE;
-    return;
-  }
-
-  /* The captured samples are now in RAM; keep the motor stopped while the
-   * comparatively slow CSV transfer is in progress. */
-  MotorControl_Stop();
-  CurrentSense_BeginCsv();
 }
 
 bool CurrentSense_IsBusy(void)
 {
-  return ((current_state == CURRENT_SENSE_ACQUIRING) ||
+  return (DmaLogger_IsBusy() ||
+          (current_state == CURRENT_SENSE_ACQUIRING) ||
           (current_state == CURRENT_SENSE_DATA_READY) ||
           (current_state == CURRENT_SENSE_SYNC_ERROR) ||
           (current_state == CURRENT_SENSE_TRANSMITTING));
@@ -673,7 +502,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
   }
 
   index = captured_sample_count;
-  if (index >= acquisition_sample_count)
+  if ((acquisition_sample_count != 0U) && (index >= acquisition_sample_count))
   {
     return;
   }
@@ -686,20 +515,23 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
     (uint16_t)HAL_ADCEx_InjectedGetValue(adc_master, ADC_INJECTED_RANK_2);
   w_raw =
     (uint16_t)HAL_ADCEx_InjectedGetValue(adc_slave, ADC_INJECTED_RANK_2);
-  CurrentSense_StoreSample(&samples[index],
-                           u1_raw,
-                           v_raw,
-                           u2_raw,
-                           w_raw);
-  CurrentSense_StoreSector(index, MotorControl_GetSector());
+  if (acquisition_sample_count != 0U) {
+    offset_sums[0] += u1_raw;
+    offset_sums[1] += v_raw;
+    offset_sums[2] += u2_raw;
+    offset_sums[3] += w_raw;
+  } else {
+    DmaLogger_Push(index, u1_raw, v_raw, u2_raw, w_raw, MotorControl_GetSector());
+  }
+  last_sample_tick = HAL_GetTick();
   __HAL_ADC_CLEAR_FLAG(adc_slave, ADC_FLAG_JEOC | ADC_FLAG_JEOS);
 
   index++;
   captured_sample_count = index;
 
-  if (index >= acquisition_sample_count)
+  if ((acquisition_sample_count != 0U) && (index >= acquisition_sample_count))
   {
-    /* Main context performs the blocking HAL stop calls and CSV output. */
+    /* Main context performs the HAL stop calls. */
     __HAL_ADC_DISABLE_IT(adc_master, ADC_IT_JEOC | ADC_IT_JEOS);
     __HAL_ADC_DISABLE_IT(adc_slave, ADC_IT_JEOC | ADC_IT_JEOS);
     current_state = CURRENT_SENSE_DATA_READY;

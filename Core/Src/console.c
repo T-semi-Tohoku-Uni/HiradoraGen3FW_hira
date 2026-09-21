@@ -37,6 +37,7 @@ static volatile uint16_t tx_read_index;
  */
 static volatile uint16_t current_dma_length;
 static volatile uint8_t is_dma_transmitting;
+static void (*block_done)(bool success);
 
 /*
  * UART受信用の変数です。
@@ -128,6 +129,7 @@ void Console_Init(UART_HandleTypeDef *huart)
   __disable_irq();
 
   console_uart = huart;
+  block_done = NULL;
   tx_write_index = 0U;
   tx_read_index = 0U;
   current_dma_length = 0U;
@@ -146,6 +148,31 @@ void Console_Init(UART_HandleTypeDef *huart)
   {
     (void)HAL_UART_Receive_IT(console_uart, &rx_byte, 1U);
   }
+}
+
+HAL_StatusTypeDef Console_TryTransmitBlock(const void *data, uint16_t length,
+                                          void (*done)(bool success))
+{
+  if (console_uart == NULL || data == NULL || length == 0U || done == NULL) {
+    return HAL_ERROR;
+  }
+  Console_StartTransmit();
+  const uint32_t mask = __get_PRIMASK();
+  __disable_irq();
+  if (is_dma_transmitting || tx_read_index != tx_write_index) {
+    __set_PRIMASK(mask);
+    return HAL_BUSY;
+  }
+  is_dma_transmitting = 1U;
+  block_done = done;
+  const HAL_StatusTypeDef status = HAL_UART_Transmit_DMA(
+    console_uart, (const uint8_t *)data, length);
+  if (status != HAL_OK) {
+    block_done = NULL;
+    is_dma_transmitting = 0U;
+  }
+  __set_PRIMASK(mask);
+  return status;
 }
 
 size_t Console_Write(const void *data, size_t length)
@@ -354,6 +381,15 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
     return;
   }
 
+  if (block_done != NULL) {
+    void (*done)(bool) = block_done;
+    block_done = NULL;
+    is_dma_transmitting = 0U;
+    done(true);
+    Console_StartTransmit();
+    return;
+  }
+
   /*
    * この関数は、UARTのDMA送信が完了したときにHALから呼ばれます。
    * 送信済みのバイト数だけ読み出し位置を進めます。
@@ -431,6 +467,17 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
   if (huart != console_uart)
   {
     return;
+  }
+
+  /* HAL has stopped the transfer on a DMA error. RX framing/overrun
+   * errors alone must not release a buffer still being read by TX DMA. */
+  if ((huart->ErrorCode & HAL_UART_ERROR_DMA) != 0U) {
+    void (*done)(bool) = block_done;
+    block_done = NULL;
+    is_dma_transmitting = 0U;
+    current_dma_length = 0U;
+    if (done != NULL) done(false);
+    Console_StartTransmit();
   }
 
   /* UARTエラーを含んだ入力途中の行は破棄します。 */
