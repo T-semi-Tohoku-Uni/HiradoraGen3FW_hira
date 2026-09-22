@@ -1,6 +1,7 @@
 #include "current_sense.h"
 
 #include "dma_logger.h"
+#include "bus_voltage.h"
 #include "motor_control.h"
 
 #include <ctype.h>
@@ -13,8 +14,6 @@
 
 #define CURRENT_SENSE_ACQUISITION_TIMEOUT_MS 1000U
 #define CURRENT_SENSE_OFFSET_SAMPLE_COUNT 1000U
-#define CURRENT_SENSE_VREF_SAMPLE_COUNT 64U
-#define CURRENT_SENSE_VREF_TIMEOUT_MS 10U
 #define CURRENT_SENSE_SHUNT_OHMS 0.001f
 #define CURRENT_SENSE_PGA_GAIN 8.0f
 /* 1.5k series, with 22k to 3.3V and 22k to GND: 11k / 12.5k. */
@@ -164,94 +163,22 @@ static HAL_StatusTypeDef CurrentSense_StopAcquisition(void)
   return result;
 }
 
-/* ADC1 regular rank 1 is VREFINT (247.5 cycles), configured by CubeMX.
- * Run before injected capture and before PWM/NTC startup. */
+/* ADC1 regularの2ランクをVMモジュールで取得し、実測VREF+で電流を換算。
+ * 起動時PWM OFFで実行し、injected電流ゼロ点校正は従来のまま維持する。 */
 static HAL_StatusTypeDef CurrentSense_CalibrateScale(void)
 {
-  const uint32_t factory_cal = *VREFINT_CAL_ADDR;
-  uint32_t sum = 0U;
-  HAL_StatusTypeDef status;
-
-  if ((factory_cal == 0U) || (factory_cal > CURRENT_SENSE_ADC_FULL_SCALE))
-  {
-    printf("ADC VREFINT factory calibration is invalid\r\n");
+  BusVoltageSample sample;
+  HAL_StatusTypeDef status = BusVoltage_Init(adc_master);
+  if (status != HAL_OK || !BusVoltage_GetSample(&sample)) {
+    printf("ADC VREFINT/VM initialization failed\r\n");
     return HAL_ERROR;
   }
-
-  /* Enable ADC, then allow >12 us for the VREFINT buffer to settle.
-   * Discard this first conversion, which may precede stabilization. */
-  status = HAL_ADC_Start(adc_master);
-  if (status == HAL_OK)
-  {
-    HAL_Delay(1U);
-    status = HAL_ADC_PollForConversion(adc_master, CURRENT_SENSE_VREF_TIMEOUT_MS);
-    if (status == HAL_OK)
-    {
-      (void)HAL_ADC_GetValue(adc_master);
-    }
-  }
-
-  for (uint32_t i = 0U; (i < CURRENT_SENSE_VREF_SAMPLE_COUNT) && (status == HAL_OK); i++)
-  {
-    uint32_t raw = 0U;
-    /* ES0431 ADC inactivity workaround, as in NTC_Task: discard the
-     * first of two consecutive conversions and retain only the second. */
-    for (uint32_t pass = 0U; pass < 2U; pass++)
-    {
-      status = HAL_ADC_Start(adc_master);
-      if (status != HAL_OK)
-      {
-        break;
-      }
-      status = HAL_ADC_PollForConversion(adc_master, CURRENT_SENSE_VREF_TIMEOUT_MS);
-      if (status != HAL_OK)
-      {
-        break;
-      }
-      raw = HAL_ADC_GetValue(adc_master);
-    }
-    if (status == HAL_OK)
-    {
-      if ((raw == 0U) || (raw >= CURRENT_SENSE_ADC_FULL_SCALE))
-      {
-        status = HAL_ERROR;
-      }
-      else
-      {
-        sum += raw;
-      }
-    }
-  }
-
-  /* Stop only the regular group on this shared ADC. */
-  if (HAL_ADCEx_RegularStop(adc_master) != HAL_OK)
-  {
-    status = HAL_ERROR;
-  }
-  if (status != HAL_OK)
-  {
-    printf("ADC VREFINT calibration failed: HAL status=%d\r\n", (int)status);
-    return status;
-  }
-
-  const float average = (float)sum / (float)CURRENT_SENSE_VREF_SAMPLE_COUNT;
-  /* Same factory-calibration ratio as __HAL_ADC_CALC_VREFANALOG_VOLTAGE,
-   * retaining the fractional average instead of rounding to integer counts. */
-  const float vref_volts = ((float)VREFINT_CAL_VREF / 1000.0f) *
-                           (float)factory_cal / average;
-  if ((vref_volts < 1.62f) || (vref_volts > 3.6f))
-  {
-    printf("ADC VREFINT calibration out of range: VREF+=%.4f V\r\n",
-           (double)vref_volts);
-    return HAL_ERROR;
-  }
-  amps_per_count = vref_volts /
+  amps_per_count = sample.vref_volts /
     ((float)CURRENT_SENSE_ADC_FULL_SCALE * CURRENT_SENSE_PGA_GAIN *
      CURRENT_SENSE_INPUT_ATTENUATION * CURRENT_SENSE_SHUNT_OHMS);
-  printf("ADC scale calibrated: VREFINT=%.3f (%u samples), "
-         "VREF+=%.4f V, A/count=%.6f\r\n",
-         (double)average, (unsigned int)CURRENT_SENSE_VREF_SAMPLE_COUNT,
-         (double)vref_volts, (double)amps_per_count);
+  printf("ADC scale calibrated: 64 pairs, VREF+=%.4f V, A/count=%.6f\r\n",
+         (double)sample.vref_volts, (double)amps_per_count);
+  BusVoltage_Print();
   return HAL_OK;
 }
 

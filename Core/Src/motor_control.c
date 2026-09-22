@@ -1,4 +1,5 @@
 #include "motor_control.h"
+#include "as5047p.h"
 #include "stspin32g4.h"
 
 #include <ctype.h>
@@ -894,7 +895,7 @@ uint8_t MotorControl_GetSector(void)
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-  if ((htim != motor_timer) || !MotorControl_IsSixStepMode(motor_mode))
+  if (htim != motor_timer)
   {
     return;
   }
@@ -906,5 +907,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     return;
   }
 
-  MotorControl_SixStepTick();
+  /* PWMの底で角度取得を開始。手動PWM/ADC取得中も同じ周期で観測する。 */
+  AS5047P_Tick();
+  if (MotorControl_IsSixStepMode(motor_mode)) MotorControl_SixStepTick();
 }

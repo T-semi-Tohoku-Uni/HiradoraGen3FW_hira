@@ -49,6 +49,8 @@ static void (*block_done)(bool success);
  * is_rx_line_overflow : 受信文字列が長すぎたことを示すフラグ
  */
 static uint8_t rx_byte;
+static volatile uint32_t rx_errors;
+static volatile uint32_t rx_overruns;
 static char rx_line_buffer[CONSOLE_RX_LINE_SIZE];
 static volatile uint16_t rx_line_length;
 static volatile uint8_t is_rx_line_ready;
@@ -165,6 +167,8 @@ HAL_StatusTypeDef Console_TryTransmitBlock(const void *data, uint16_t length,
   }
   is_dma_transmitting = 1U;
   block_done = done;
+  /* DMA起動中もRXを許可。921600bpsでは約10.85usごとに次の文字が来る。 */
+  __set_PRIMASK(mask);
   const HAL_StatusTypeDef status = HAL_UART_Transmit_DMA(
     console_uart, (const uint8_t *)data, length);
   if (status != HAL_OK) {
@@ -259,6 +263,9 @@ bool Console_ReadLine(char *destination, size_t destination_size)
   {
     received_length = rx_line_length;
 
+    /* ready中はISRがこの行を書き換えない。長いコピーは排他の外で行う。 */
+    __set_PRIMASK(interrupt_state);
+
     if ((size_t)received_length < destination_size)
     {
       memcpy(destination, rx_line_buffer, received_length);
@@ -271,6 +278,7 @@ bool Console_ReadLine(char *destination, size_t destination_size)
     }
 
     /* 読み出しが終わったため、次の1行を受信できる状態へ戻します。 */
+    __disable_irq();
     rx_line_length = 0U;
     is_rx_line_ready = 0U;
     is_rx_line_overflow = 0U;
@@ -422,13 +430,17 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     return;
   }
 
+  /* 解析の前に受信を再開し、受信不能な時間を短縮する。 */
+  const uint8_t received_byte = rx_byte;
+  (void)HAL_UART_Receive_IT(console_uart, &rx_byte, 1U);
+
   /*
    * 1行をmain側が読み出すまでは、次のコマンドを保存しません。
    * 今回は同時に複数行を送らない前提なので、1行バッファで十分です。
    */
   if (is_rx_line_ready == 0U)
   {
-    if ((rx_byte == '\r') || (rx_byte == '\n'))
+    if ((received_byte == '\r') || (received_byte == '\n'))
     {
       /* 空行は無視し、1文字以上受信した場合だけ受信完了とします。 */
       if ((rx_line_length > 0U) || (is_rx_line_overflow != 0U))
@@ -447,7 +459,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     {
       if (rx_line_length < (CONSOLE_RX_LINE_SIZE - 1U))
       {
-        rx_line_buffer[rx_line_length] = (char)rx_byte;
+        rx_line_buffer[rx_line_length] = (char)received_byte;
         rx_line_length++;
       }
       else
@@ -458,8 +470,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     }
   }
 
-  /* 次の1文字を受信できるよう、毎回受信割り込みを再設定します。 */
-  (void)HAL_UART_Receive_IT(console_uart, &rx_byte, 1U);
+  /* 次の受信はコールバック先頭ですでに再開済み。 */
 }
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
@@ -468,6 +479,8 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
   {
     return;
   }
+  rx_errors++;
+  if ((huart->ErrorCode & HAL_UART_ERROR_ORE) != 0U) rx_overruns++;
 
   /* HAL has stopped the transfer on a DMA error. RX framing/overrun
    * errors alone must not release a buffer still being read by TX DMA. */
@@ -484,7 +497,8 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
   if (is_rx_line_ready == 0U)
   {
     rx_line_length = 0U;
-    is_rx_line_overflow = 0U;
+    /* 壊れた行の後半を別の有効コマンドとして実行しない。 */
+    is_rx_line_overflow = 1U;
   }
 
   /* オーバーランなどで受信が停止した場合だけ、割り込み受信を再開します。 */
@@ -492,4 +506,12 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
   {
     (void)HAL_UART_Receive_IT(console_uart, &rx_byte, 1U);
   }
+}
+
+bool Console_ProcessCommand(const char *command)
+{
+  if (command == NULL || strcmp(command, "serial status") != 0) return false;
+  printf("Serial RX: errors=%lu, overrun=%lu\r\n",
+         (unsigned long)rx_errors, (unsigned long)rx_overruns);
+  return true;
 }

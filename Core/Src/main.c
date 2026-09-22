@@ -24,6 +24,7 @@
 #include "as5047p.h"
 #include "console.h"
 #include "current_sense.h"
+#include "bus_voltage.h"
 #include "motor_control.h"
 #include "ntc.h"
 #include "stspin32g4.h"
@@ -58,6 +59,8 @@ OPAMP_HandleTypeDef hopamp2;
 OPAMP_HandleTypeDef hopamp3;
 
 SPI_HandleTypeDef hspi1;
+DMA_HandleTypeDef hdma_spi1_rx;
+DMA_HandleTypeDef hdma_spi1_tx;
 
 TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim4;
@@ -259,9 +262,9 @@ int main(void)
   {
     printf("TIM1 three-phase PWM started at U=V=W=50.00 %%\r\n");
   }
-  AS5047P_Init(&hspi1);
+  AS5047P_Init(&hspi1, &htim1);
   printf("Command: <offset>, u/v/w <offset>, mid, stop, start, "
-         "run cw/ccw <rpm>, status, adc [decimation], adc stop, adc status, ntc, ntc stop, angle, angle stop, fault, fault clear\r\n");
+         "run cw/ccw <rpm>, status, adc [decimation], adc stop, adc status, vm, ntc, ntc stop, angle, angle stop, angle status, serial status, fault, fault clear\r\n");
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -271,6 +274,10 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    /* regularは非blocking。取得中は他のmainタスクを後回しにし、
+     * ADCの休止を避ける。injected/TIM/UART割り込みは常時有効。 */
+    BusVoltage_Task();
+    if (BusVoltage_IsAcquiring()) continue;
     CurrentSense_Task();
     NTC_Task();
     AS5047P_Task();
@@ -279,15 +286,20 @@ int main(void)
     {
       if (CurrentSense_IsBusy())
       {
-        if (CurrentSense_ProcessCommand(motor_command)) {
+        if (Console_ProcessCommand(motor_command) ||
+            AS5047P_ProcessCommand(motor_command) ||
+            BusVoltage_ProcessCommand(motor_command) ||
+            CurrentSense_ProcessCommand(motor_command)) {
           /* Logger commands remain available while streaming. */
         } else if (MotorControl_ProcessStopCommand(motor_command)) {
           (void)CurrentSense_ProcessCommand("adc stop");
         } else {
-          printf("ADC logger busy; use 'adc stop', 'adc status' or 'stop'\r\n");
+          printf("ADC logger busy; use 'adc stop', 'adc status', 'vm' or 'stop'\r\n");
         }
       }
-      else if (!ProcessGateDriverFaultCommand(motor_command) &&
+      else if (!Console_ProcessCommand(motor_command) &&
+               !BusVoltage_ProcessCommand(motor_command) &&
+               !ProcessGateDriverFaultCommand(motor_command) &&
                !AS5047P_ProcessCommand(motor_command) &&
                !NTC_ProcessCommand(motor_command) &&
                !CurrentSense_ProcessCommand(motor_command))
@@ -376,8 +388,9 @@ static void MX_ADC1_Init(void)
   hadc1.Init.EOCSelection = ADC_EOC_SEQ_CONV;
   hadc1.Init.LowPowerAutoWait = DISABLE;
   hadc1.Init.ContinuousConvMode = DISABLE;
-  hadc1.Init.NbrOfConversion = 1;
-  hadc1.Init.DiscontinuousConvMode = DISABLE;
+  hadc1.Init.NbrOfConversion = 2;
+  hadc1.Init.DiscontinuousConvMode = ENABLE;
+  hadc1.Init.NbrOfDiscConversion = 1;
   hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
   hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
   hadc1.Init.DMAContinuousRequests = DISABLE;
@@ -406,6 +419,15 @@ static void MX_ADC1_Init(void)
   sConfig.SingleDiff = ADC_SINGLE_ENDED;
   sConfig.OffsetNumber = ADC_OFFSET_NONE;
   sConfig.Offset = 0;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Regular Channel
+  */
+  sConfig.Channel = ADC_CHANNEL_8;
+  sConfig.Rank = ADC_REGULAR_RANK_2;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
     Error_Handler();
@@ -911,7 +933,7 @@ static void MX_USART1_UART_Init(void)
   {
     Error_Handler();
   }
-  if (HAL_UARTEx_DisableFifoMode(&huart1) != HAL_OK)
+  if (HAL_UARTEx_EnableFifoMode(&huart1) != HAL_OK)
   {
     Error_Handler();
   }
@@ -933,8 +955,14 @@ static void MX_DMA_Init(void)
 
   /* DMA interrupt init */
   /* DMA1_Channel1_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 2, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel1_IRQn);
+  /* DMA1_Channel2_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel2_IRQn, 1, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel2_IRQn);
+  /* DMA1_Channel3_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel3_IRQn, 1, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel3_IRQn);
 
 }
 
@@ -952,8 +980,8 @@ static void MX_GPIO_Init(void)
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOF_CLK_ENABLE();
-  __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOE_CLK_ENABLE();
 

@@ -15,9 +15,9 @@ extern "C" {
  * ADC1 is expected to be the master and ADC2 the slave of the injected
  * simultaneous conversion configured by CubeMX.
  * Call before enabling motor PWM, with zero phase current. Blocks until
- * 64 VREFINT readings and 1000 zero-current sample sets are captured
+ * 64 VREFINT/VM pairs and 1000 zero-current sample sets are captured
  * (or timeout). ADC1 regular rank 1 must be VREFINT with adequate sampling
- * time. Calibration accumulates sums without storing samples. Streaming formats calibrated currents in main context and sends
+ * time; regular rank 2 must be PC2/IN8, discontinuous one rank per start. Calibration accumulates sums without storing samples. Streaming formats calibrated currents in main context and sends
  * standard Teleplot serial text over UART DMA.
  */
 HAL_StatusTypeDef CurrentSense_Init(ADC_HandleTypeDef *master_adc,

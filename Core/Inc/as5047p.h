@@ -1,16 +1,21 @@
 #ifndef AS5047P_H
 #define AS5047P_H
-
 #include "stm32g4xx_hal.h"
 #include <stdbool.h>
 
-/* Main-loop only. SPI must already be configured for Mode 1, 16-bit, MSB first.
- * Reporting is initially off; "angle" starts reporting at ~100 ms intervals.
- * Waits 10 ms, then prints a one-shot diagnostic/angle check via Console.
- * Call after Console_Init(), with the sensor powered and SPI handle valid.
- */
-void AS5047P_Init(SPI_HandleTypeDef *spi);
+/* 電気角はoffset未校正。今回は観測専用。 */
+typedef struct {
+  uint16_t raw;
+  float mechanical_rad, electrical_rad;
+  uint32_t request_cycles, received_cycles, updated_ms, sequence;
+  bool valid;
+} AS5047P_Sample;
+void AS5047P_Init(SPI_HandleTypeDef *spi, TIM_HandleTypeDef *timer);
 void AS5047P_Task(void);
+void AS5047P_Tick(void); /* TIM1底のISRから一度だけ呼ぶ。 */
+bool AS5047P_GetSample(AS5047P_Sample *sample);
 bool AS5047P_ProcessCommand(const char *command);
-
-#endif /* AS5047P_H */
+/* 専用DMAが所有するIRQならtrueを返す。HAL IRQとの二重処理を防ぐ。 */
+bool AS5047P_DMA_IRQHandler(DMA_HandleTypeDef *dma);
+bool AS5047P_SPI_IRQHandler(SPI_HandleTypeDef *spi);
+#endif

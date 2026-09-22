@@ -70,6 +70,7 @@ HAL_StatusTypeDef Console_Flush(uint32_t timeout_ms);
  * @return true when a line was copied, otherwise false.
  */
 bool Console_ReadLine(char *destination, size_t destination_size);
+bool Console_ProcessCommand(const char *command);
 
 #ifdef __cplusplus
 }
