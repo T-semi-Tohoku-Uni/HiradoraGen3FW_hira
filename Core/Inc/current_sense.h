@@ -38,6 +38,10 @@ void CurrentSense_Task(void);
 
 /** @brief Return true while acquisition or DMA draining is in progress. */
 bool CurrentSense_IsBusy(void);
+/* 制御中はログのON/OFFに関係なくinjected監視を継続する。main専用。 */
+HAL_StatusTypeDef CurrentSense_BeginControl(void);
+void CurrentSense_EndControl(void);
+
 
 #ifdef __cplusplus
 }

@@ -10,6 +10,24 @@
 #define MOTOR_CONTROL_ENCODER_DIAG_PERIOD_MS        20U
 #define MOTOR_CONTROL_ENCODER_DIAG_STALE_MS         100U
 
+/* モーター交換・相配線変更時はIDを変更し、必ず手動で再校正する。 */
+#define MOTOR_CONTROL_MOTOR_ID                     1U
+#define MOTOR_CONTROL_KV_RPM_PER_VOLT               140.0f
+/* 定格不明のため、以下は実験用保護値。KVから許容電流は推定しない。 */
+#define MOTOR_CONTROL_CURRENT_LIMIT_A              5.0f
+#define MOTOR_CONTROL_CAL_CURRENT_LIMIT_A          5.0f
+/* N5065実測：1Vへのramp中、約0.70Vで5Aに到達。0.4Vで校正完走を確認。 */
+#define MOTOR_CONTROL_CAL_VOLTAGE                   0.4f
+#define MOTOR_CONTROL_VM_MIN_VOLTS                 6.0f
+#define MOTOR_CONTROL_VOLTAGE_LIMIT                 3.0f
+#define MOTOR_CONTROL_PWM_MARGIN                   0.05f
+#define MOTOR_CONTROL_CAL_RAMP_MS                  500U
+#define MOTOR_CONTROL_CAL_HOLD_MS                  700U
+#define MOTOR_CONTROL_CAL_SWEEP_MS                 4000U
+#define MOTOR_CONTROL_CAL_MOTION_TOLERANCE          0.20f
+#define MOTOR_CONTROL_CAL_POSITION_TOLERANCE_RAD    0.15f
+#define MOTOR_CONTROL_CAL_WATCHDOG_MS               20U
+
 /* Charge all three bootstrap capacitors before each PWM start. */
 #define MOTOR_CONTROL_BOOTSTRAP_CHARGE_US           750U
 
@@ -41,8 +59,8 @@
 /* Maximum permitted deviation from 50% in the legacy manual PWM mode. */
 #define MOTOR_CONTROL_MAX_DUTY_OFFSET_PERCENT       10.0f
 
-/* VM（PC2）の分圧と監視設定。上限判定は現在は表示のみ。
- * 運転停止への接続はFOC実装時に行う。 */
+/* VM（PC2）の分圧と監視設定。校正中は上下限で停止する。
+ * 既存manual/six-stepには自動停止を接続していない。 */
 #define MOTOR_CONTROL_VM_NOMINAL_VOLTS              24.0f
 #define MOTOR_CONTROL_VM_MAX_VOLTS                  30.0f
 #define MOTOR_CONTROL_VM_DIVIDER_TOP_OHMS           100000.0f

@@ -3,6 +3,7 @@
 #include "dma_logger.h"
 #include "bus_voltage.h"
 #include "motor_control.h"
+#include "motor_calibration.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -42,6 +43,7 @@ static bool timer_started_for_capture;
 static uint32_t acquisition_sample_count;
 static float offsets[4]; /* U1, V, U2, W, in ADC counts. */
 static float amps_per_count;
+static volatile bool control_acquisition, log_requested;
 
 static void CurrentSense_DisableTrigger(void)
 {
@@ -296,6 +298,12 @@ HAL_StatusTypeDef CurrentSense_Init(ADC_HandleTypeDef *master_adc,
 
 static void CurrentSense_EndStream(void)
 {
+  log_requested = false;
+  if (control_acquisition && current_state == CURRENT_SENSE_ACQUIRING) {
+    DmaLogger_Stop(); /* 電流保護用ADCは停止しない。 */
+    printf("ADC logging disabled; current monitoring continues (queued data may follow)\r\n");
+    return;
+  }
   /* Stop ISR writes before sealing a partially filled block. */
   current_state = CURRENT_SENSE_TRANSMITTING;
   if (CurrentSense_StopAcquisition() != HAL_OK) {
@@ -320,12 +328,20 @@ bool CurrentSense_ProcessCommand(const char *command)
     return true;
   }
   if (CurrentSense_IsCommand(argument, "status")) {
-    const char *state = current_state == CURRENT_SENSE_ACQUIRING ? "streaming" :
+    const char *state = control_acquisition && !log_requested ?
+                        (DmaLogger_IsBusy() ? "draining (control ADC active)" : "off (control ADC active)") :
+                        current_state == CURRENT_SENSE_ACQUIRING ? "streaming" :
                         current_state == CURRENT_SENSE_TRANSMITTING ? "draining" :
                         current_state == CURRENT_SENSE_IDLE ? "idle" :
                         current_state == CURRENT_SENSE_UNINITIALIZED ? "uninitialized" : "error";
     printf("ADC logger: %s, overrun=%lu\r\n",
            state, (unsigned long)DmaLogger_Overruns());
+    if (control_acquisition) {
+      /* ADC取得とログ表示は別。表示停止中も取得番号が増えることを確認できる。 */
+      const uint32_t tick = last_sample_tick;
+      printf("ADC control: samples=%lu, age=%lu ms\r\n",
+             (unsigned long)captured_sample_count, (unsigned long)(HAL_GetTick()-tick));
+    }
     return true;
   }
   uint32_t decimation = DMA_LOGGER_DEFAULT_DECIMATION;
@@ -339,11 +355,15 @@ bool CurrentSense_ProcessCommand(const char *command)
     }
     decimation = (uint32_t)value;
   }
+  if (MotorCalibration_IsActive() && !MotorControl_IsVoltageMode()) {
+    printf("Calibration is checking standstill; start adc after the voltage ramp begins\r\n");
+    return true;
+  }
   if (current_state == CURRENT_SENSE_UNINITIALIZED) {
     printf("ADC logger is not initialized\r\n");
     return true;
   }
-  if (current_state != CURRENT_SENSE_IDLE || DmaLogger_IsBusy()) {
+  if ((!control_acquisition && current_state != CURRENT_SENSE_IDLE) || DmaLogger_IsBusy()) {
     printf("ADC logger busy; send 'adc stop' first\r\n");
     return true;
   }
@@ -355,9 +375,10 @@ bool CurrentSense_ProcessCommand(const char *command)
      (sample_timer->Instance->PSC + 1U)) / timer_clock);
   DmaLogger_Start(decimation, period_ns, offsets, amps_per_count);
   /* Zero sample limit selects continuous acquisition, not calibration. */
-  const HAL_StatusTypeDef status = CurrentSense_StartAcquisition(0U);
+  log_requested = true;
+  const HAL_StatusTypeDef status = control_acquisition ? HAL_OK : CurrentSense_StartAcquisition(0U);
   if (status != HAL_OK) {
-    DmaLogger_Stop();
+    log_requested = false; DmaLogger_Stop();
     printf("ADC logger start failed: HAL status=%d\r\n", (int)status);
   } else {
     printf("ADC DMA logger started: decimation=%lu, period_ns=%lu\r\n",
@@ -375,6 +396,7 @@ void CurrentSense_Task(void)
       (current_state == CURRENT_SENSE_ACQUIRING &&
        (uint32_t)(HAL_GetTick() - sample_tick) >=
          CURRENT_SENSE_ACQUISITION_TIMEOUT_MS)) {
+    MotorCalibration_TripISR("ADC acquisition error");
     printf("ADC logger stopped: synchronization error or trigger timeout\r\n");
     CurrentSense_EndStream();
   }
@@ -424,6 +446,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
   if (wait_count == 0U)
   {
     __HAL_ADC_DISABLE_IT(adc_master, ADC_IT_JEOC | ADC_IT_JEOS);
+    MotorCalibration_TripISR("ADC synchronization error");
     current_state = CURRENT_SENSE_SYNC_ERROR;
     return;
   }
@@ -447,8 +470,18 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
     offset_sums[1] += v_raw;
     offset_sums[2] += u2_raw;
     offset_sums[3] += w_raw;
-  } else {
+  } else if (log_requested) {
     DmaLogger_Push(index, u1_raw, v_raw, u2_raw, w_raw, MotorControl_GetSector());
+  }
+  if (control_acquisition) {
+    const uint16_t raw[4] = {u1_raw, v_raw, u2_raw, w_raw};
+    float currents[4];
+    bool rails = false;
+    for (unsigned i=0; i<4; i++) {
+      currents[i] = ((float)raw[i] - offsets[i]) * amps_per_count;
+      if (raw[i] < 16U || raw[i] > 4079U) rails = true;
+    }
+    MotorCalibration_CurrentISR(currents, rails);
   }
   last_sample_tick = HAL_GetTick();
   __HAL_ADC_CLEAR_FLAG(adc_slave, ADC_FLAG_JEOC | ADC_FLAG_JEOS);
@@ -463,4 +496,21 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
     __HAL_ADC_DISABLE_IT(adc_slave, ADC_IT_JEOC | ADC_IT_JEOS);
     current_state = CURRENT_SENSE_DATA_READY;
   }
+}
+
+HAL_StatusTypeDef CurrentSense_BeginControl(void)
+{
+  if (CurrentSense_IsBusy() || current_state != CURRENT_SENSE_IDLE) return HAL_BUSY;
+  control_acquisition = true; log_requested = false;
+  HAL_StatusTypeDef result = CurrentSense_StartAcquisition(0U);
+  /* MotorControlがPWMを所有するので、ADC側ではTIM1を停止しない。 */
+  if (result == HAL_OK) timer_started_for_capture = false;
+  else control_acquisition = false;
+  return result;
+}
+void CurrentSense_EndControl(void)
+{
+  if (!control_acquisition) return;
+  control_acquisition = false;
+  CurrentSense_EndStream();
 }

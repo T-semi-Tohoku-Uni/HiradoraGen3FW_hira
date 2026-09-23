@@ -18,7 +18,7 @@ typedef enum
 } MotorControlPhase;
 
 /**
- * @brief Charge bootstraps, clear faults, then start PWM at 50% duty.
+ * @brief Initialize motor control with all PWM outputs stopped.
  * @param htim Advanced-control timer with CH1/CH1N through CH3/CH3N.
  * @param hi2c Gate-driver I2C handle. Failed starts leave PWM stopped.
  */
@@ -60,6 +60,12 @@ void MotorControl_Stop(void);
  * from the ADC interrupt.
  */
 uint8_t MotorControl_GetSector(void);
+/* 校正専用の電圧モード。計算はmain、3相CCRの反映はTIM1の底で行う。 */
+bool MotorControl_IsStopped(void);
+bool MotorControl_IsVoltageMode(void);
+HAL_StatusTypeDef MotorControl_StartVoltage(void);
+bool MotorControl_SetVoltage(float angle, float vd, float vq, float vm);
+
 
 #ifdef __cplusplus
 }

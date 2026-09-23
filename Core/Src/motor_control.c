@@ -1,5 +1,7 @@
 #include "motor_control.h"
 #include "as5047p.h"
+#include "voltage_vector.h"
+#include "motor_calibration.h"
 #include "stspin32g4.h"
 
 #include <ctype.h>
@@ -57,6 +59,7 @@ typedef enum
 {
   MOTOR_CONTROL_MODE_STOPPED = 0,
   MOTOR_CONTROL_MODE_MANUAL,
+  MOTOR_CONTROL_MODE_VOLTAGE,
   MOTOR_CONTROL_MODE_SIX_STEP_ALIGNMENT,
   MOTOR_CONTROL_MODE_SIX_STEP_RAMP,
   MOTOR_CONTROL_MODE_SIX_STEP_RUNNING
@@ -72,7 +75,8 @@ static TIM_HandleTypeDef *motor_timer;
 static I2C_HandleTypeDef *gate_driver_i2c;
 static MotorControlPhase selected_phase = MOTOR_CONTROL_PHASE_U;
 static float selected_offset_percent;
-static bool outputs_enabled;
+static volatile bool outputs_enabled;
+static volatile uint32_t voltage_compare[3];
 static volatile MotorControlMode motor_mode = MOTOR_CONTROL_MODE_STOPPED;
 static volatile uint8_t current_sector;
 static volatile uint32_t reference_rpm;
@@ -720,7 +724,8 @@ HAL_StatusTypeDef MotorControl_Init(TIM_HandleTypeDef *htim,
   selected_phase = MOTOR_CONTROL_PHASE_U;
   __HAL_TIM_CLEAR_FLAG(motor_timer, TIM_FLAG_UPDATE);
   __HAL_TIM_ENABLE_IT(motor_timer, TIM_IT_UPDATE);
-  return MotorControl_StartAtMidpoint();
+  MotorControl_Stop();
+  return HAL_OK;
 }
 
 bool MotorControl_ProcessCommand(const char *command)
@@ -736,6 +741,10 @@ bool MotorControl_ProcessCommand(const char *command)
 
   command = MotorControl_SkipSpaces(command);
 
+  if (MotorCalibration_IsActive() && !MotorControl_IsCommand(command, "stop") &&
+      !MotorControl_IsCommand(command, "status")) {
+    printf("Calibration active; send stop first\r\n"); return true;
+  }
   if (MotorControl_ParseRunCommand(command))
   {
     return true;
@@ -743,6 +752,7 @@ bool MotorControl_ProcessCommand(const char *command)
 
   if (MotorControl_IsCommand(command, "stop"))
   {
+    MotorCalibration_TripISR("user stop");
     MotorControl_Stop();
     printf("PWM stopped\r\n");
     return true;
@@ -794,6 +804,7 @@ bool MotorControl_ProcessCommand(const char *command)
     {
       printf("PWM: %s, mode=%s, selected=%s, offset=%+.2f %%\r\n",
              outputs_enabled ? "running" : "stopped",
+             (motor_mode == MOTOR_CONTROL_MODE_VOLTAGE) ? "calibration" :
              (motor_mode == MOTOR_CONTROL_MODE_MANUAL) ? "manual" : "off",
              MotorControl_PhaseName(selected_phase),
              selected_offset_percent);
@@ -854,6 +865,7 @@ bool MotorControl_ProcessStopCommand(const char *command)
     return false;
   }
 
+  MotorCalibration_TripISR("user stop");
   MotorControl_Stop();
   printf("PWM stopped\r\n");
   return true;
@@ -908,6 +920,43 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   }
 
   /* PWMの底で角度取得を開始。手動PWM/ADC取得中も同じ周期で観測する。 */
+  MotorCalibration_WatchdogISR();
   AS5047P_Tick();
+  if (MotorControl_IsVoltageMode()) {
+    __HAL_TIM_SET_COMPARE(motor_timer, TIM_CHANNEL_1, voltage_compare[0]);
+    __HAL_TIM_SET_COMPARE(motor_timer, TIM_CHANNEL_2, voltage_compare[1]);
+    __HAL_TIM_SET_COMPARE(motor_timer, TIM_CHANNEL_3, voltage_compare[2]);
+  }
   if (MotorControl_IsSixStepMode(motor_mode)) MotorControl_SixStepTick();
+}
+
+/* 電圧モードでは既存のbootstrap/FAULT確認を再利用する。 */
+bool MotorControl_IsStopped(void) { return !outputs_enabled; }
+bool MotorControl_IsVoltageMode(void) { return motor_mode == MOTOR_CONTROL_MODE_VOLTAGE; }
+HAL_StatusTypeDef MotorControl_StartVoltage(void)
+{
+  if (!MotorControl_IsStopped()) return HAL_BUSY;
+  HAL_StatusTypeDef result = MotorControl_StartAtMidpoint();
+  if (result != HAL_OK) return result;
+  uint32_t mask = __get_PRIMASK(); __disable_irq();
+  for (unsigned i=0; i<3; i++) voltage_compare[i] = MotorControl_MidpointCompare();
+  motor_mode = MOTOR_CONTROL_MODE_VOLTAGE;
+  __set_PRIMASK(mask);
+  return HAL_OK;
+}
+bool MotorControl_SetVoltage(float angle, float vd, float vq, float vm)
+{
+  float duty[3];
+  if (!VoltageVector_Compute(angle, vd, vq, vm, MOTOR_CONTROL_VOLTAGE_LIMIT,
+                             MOTOR_CONTROL_PWM_MARGIN, duty)) return false;
+  uint32_t compare[3];
+  for (unsigned i=0; i<3; i++) compare[i] = (uint32_t)(duty[i] *
+      (float)(__HAL_TIM_GET_AUTORELOAD(motor_timer)+1U) + 0.5f);
+  /* mainからCCRを直接更新すると更新イベントが3相の途中に来る可能性がある。
+   * 短い排他区間ではRAMだけを公開し、ISRの底で全preloadへ反映する。 */
+  uint32_t mask = __get_PRIMASK(); __disable_irq();
+  bool enabled = MotorControl_IsVoltageMode();
+  if (enabled) for (unsigned i=0; i<3; i++) voltage_compare[i] = compare[i];
+  __set_PRIMASK(mask);
+  return enabled;
 }

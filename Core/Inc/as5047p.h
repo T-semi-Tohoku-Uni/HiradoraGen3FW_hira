@@ -18,4 +18,6 @@ bool AS5047P_ProcessCommand(const char *command);
 /* 専用DMAが所有するIRQならtrueを返す。HAL IRQとの二重処理を防ぐ。 */
 bool AS5047P_DMA_IRQHandler(DMA_HandleTypeDef *dma);
 bool AS5047P_SPI_IRQHandler(SPI_HandleTypeDef *spi);
+void AS5047P_Pause(void);
+void AS5047P_Resume(void);
 #endif

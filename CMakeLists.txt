@@ -31,8 +31,14 @@ message("Build type: " ${CMAKE_BUILD_TYPE})
 # Enable CMake support for ASM and C languages
 enable_language(C ASM)
 
+# User-owned linker reserves the calibration page; CubeMX file remains untouched.
+string(REPLACE "STM32G431XX_FLASH.ld" "STM32G431xx_CAL_FLASH.ld" CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}")
+string(REPLACE "STM32G431xx_FLASH.ld" "STM32G431xx_CAL_FLASH.ld" CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}")
+
 # Create an executable object type
 add_executable(${CMAKE_PROJECT_NAME})
+
+set_property(TARGET ${CMAKE_PROJECT_NAME} APPEND PROPERTY LINK_DEPENDS "${CMAKE_SOURCE_DIR}/STM32G431xx_CAL_FLASH.ld")
 
 # Add STM32CubeMX generated sources
 add_subdirectory(cmake/stm32cubemx)
@@ -44,6 +50,9 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
+    Core/Src/voltage_vector.c
+    Core/Src/calibration_store.c
+    Core/Src/motor_calibration.c
     Core/Src/bus_voltage.c
     Core/Src/as5047p.c
     Core/Src/console.c

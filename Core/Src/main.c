@@ -26,6 +26,7 @@
 #include "current_sense.h"
 #include "bus_voltage.h"
 #include "motor_control.h"
+#include "motor_calibration.h"
 #include "ntc.h"
 #include "stspin32g4.h"
 #include <ctype.h>
@@ -260,11 +261,12 @@ int main(void)
   }
   else
   {
-    printf("TIM1 three-phase PWM started at U=V=W=50.00 %%\r\n");
+    printf("Motor initialized; PWM stopped (explicit start required)\r\n");
   }
   AS5047P_Init(&hspi1, &htim1);
+  MotorCalibration_Init();
   printf("Command: <offset>, u/v/w <offset>, mid, stop, start, "
-         "run cw/ccw <rpm>, status, adc [decimation], adc stop, adc status, vm, ntc, ntc stop, angle, angle stop, angle status, serial status, fault, fault clear\r\n");
+         "run cw/ccw <rpm>, status, adc [decimation], adc stop, adc status, vm, ntc, ntc stop, angle, angle stop, angle status, serial status, cal start/status/stop/save, fault, fault clear\r\n");
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -281,12 +283,14 @@ int main(void)
     CurrentSense_Task();
     NTC_Task();
     AS5047P_Task();
+    MotorCalibration_Task();
 
     if (Console_ReadLine(motor_command, sizeof(motor_command)))
     {
-      if (CurrentSense_IsBusy())
+      if (CurrentSense_IsBusy() || MotorCalibration_IsActive())
       {
-        if (Console_ProcessCommand(motor_command) ||
+        if (MotorCalibration_ProcessCommand(motor_command) ||
+            Console_ProcessCommand(motor_command) ||
             AS5047P_ProcessCommand(motor_command) ||
             BusVoltage_ProcessCommand(motor_command) ||
             CurrentSense_ProcessCommand(motor_command)) {
@@ -297,7 +301,8 @@ int main(void)
           printf("ADC logger busy; use 'adc stop', 'adc status', 'vm' or 'stop'\r\n");
         }
       }
-      else if (!Console_ProcessCommand(motor_command) &&
+      else if (!MotorCalibration_ProcessCommand(motor_command) &&
+               !Console_ProcessCommand(motor_command) &&
                !BusVoltage_ProcessCommand(motor_command) &&
                !ProcessGateDriverFaultCommand(motor_command) &&
                !AS5047P_ProcessCommand(motor_command) &&

@@ -221,7 +221,7 @@ static void PrintStatus(void)
          (sample_timer != NULL && (sample_timer->Instance->CR1 & TIM_CR1_CEN)) ? "TIM1" : "main",
          (unsigned long)transfers, transfer_cycles * us, max_transfer_cycles * us,
          interval_cycles * us, max_interval_cycles * us, max_launch_cycles * us);
-  printf("Encoder errors: spi=%lu, parity=%lu, sensor=%lu, timeout=%lu, busy_ticks=%lu, diag=0x%04X, errfl=0x%04X; offset UNCALIBRATED\r\n",
+  printf("Encoder errors: spi=%lu, parity=%lu, sensor=%lu, timeout=%lu, busy_ticks=%lu, diag=0x%04X, errfl=0x%04X; displayed electrical angle is uncalibrated\r\n",
          (unsigned long)spi_errors, (unsigned long)parity_errors, (unsigned long)sensor_errors,
          (unsigned long)timeouts, (unsigned long)missed, (unsigned int)diagnostic, (unsigned int)error_flags);
 }
@@ -323,4 +323,21 @@ void AS5047P_Init(SPI_HandleTypeDef *spi, TIM_HandleTypeDef *timer)
   uint32_t began = HAL_GetTick();
   while (latest.sequence == 0U && (uint32_t)(HAL_GetTick() - began) < 30U) AS5047P_Task();
   PrintStatus();
+}
+
+/* Flash書き込み前のmain専用。PWM停止中にだけ使用する。 */
+void AS5047P_Pause(void)
+{
+  uint32_t mask = __get_PRIMASK(); __disable_irq();
+  if (!fast_owned) { __set_PRIMASK(mask); return; }
+  state = OFF; StopDma();
+  (void)WaitIdle();
+  SPI1_SS_GPIO_Port->BSRR = SPI1_SS_Pin;
+  latest.valid = false; diagnostic_ok = false;
+  __set_PRIMASK(mask);
+}
+void AS5047P_Resume(void)
+{
+  /* 途中の応答は破棄し、既存のmain復旧処理でFIFOを排出する。 */
+  if (fast_owned) state = FAILED;
 }
