@@ -12,20 +12,21 @@
 #include <ctype.h>
 #define PI 3.14159265358979323846f
 #define TWO_PI (2.0f*PI)
-typedef enum { IDLE, CHECK_STILL, RAMP, HOLD_ZERO, FORWARD, HOLD_END, BACKWARD, HOLD_RETURN } CalStage;
+typedef enum { IDLE, CHECK_STILL, RAMP, HOLD_ZERO, FORWARD, HOLD_END, BACKWARD, HOLD_RETURN, APPROACH, HOLD_APPROACH } CalStage;
 static volatile CalStage stage;
 static CalibrationRecord record;
 static bool calibrated, saved;
 /* ログの間引きで消える瞬間的な過電流も、停止したサンプルをISRで保存する。
  * 出力はPWM停止後のmainのみ。保護判定を遅らせない。 */
 static volatile float trip_current[4], peak_current, requested_voltage;
+static volatile float observed_current[4];
 static volatile uint32_t trip_stage, trip_elapsed;
 static volatile bool trip_captured;
 static const char *volatile fault;
 static volatile uint32_t heartbeat, current_ms;
 static volatile bool energized;
 static uint32_t stage_ms, task_ms, sequence;
-static float previous_angle, position, origin, end_position;
+static float previous_angle, position, origin, end_position, approach_start;
 static float sum, minimum, maximum;
 static unsigned count;
 static bool Same(const char *text, const char *expected)
@@ -52,11 +53,13 @@ void MotorCalibration_CurrentISR(const float currents[4], bool rails)
 {
   if (!MotorCalibration_IsActive()) return;
   current_ms = HAL_GetTick();
+  for (unsigned i=0; i<4; i++) observed_current[i] = currents[i];
   if (rails) { MotorCalibration_TripISR("ADC saturated"); return; }
   for (unsigned i=0; i<4; i++) {
     if (fabsf(currents[i]) > peak_current) peak_current = fabsf(currents[i]);
-    if (!isfinite(currents[i]) || fabsf(currents[i]) > MOTOR_CONTROL_CAL_CURRENT_LIMIT_A ||
-        fabsf(currents[i]) > MOTOR_CONTROL_CURRENT_LIMIT_A) {
+    /* 校正は専用の10A閾値で判定。通常運転用の5Aを重ねて適用しない。
+     * NaN/InfとADC飽和の停止は従来どおり維持する。 */
+    if (!isfinite(currents[i]) || fabsf(currents[i]) > MOTOR_CONTROL_CAL_CURRENT_LIMIT_A) {
       if (!trip_captured) {
         for (unsigned j=0; j<4; j++) trip_current[j] = currents[j];
         trip_stage = (uint32_t)stage; trip_elapsed = HAL_GetTick()-stage_ms;
@@ -89,10 +92,10 @@ static void Finish(const char *reason)
   printf("Calibration %s; PWM stopped\r\n", reason);
   printf("Calibration peak (all ADC samples): %.3f A\r\n", (double)peak_current);
   if (trip_captured) printf("Calibration trip: stage=%lu, elapsed=%lu ms, requested=%.3f V, "
-      "U1=%.3f V=%.3f U2=%.3f W=%.3f A, peak=%.3f A, limits=%.3f/%.3f A\r\n",
+      "U1=%.3f V=%.3f U2=%.3f W=%.3f A, peak=%.3f A, cal_limit=%.3f A\r\n",
       (unsigned long)trip_stage, (unsigned long)trip_elapsed, (double)requested_voltage,
       (double)trip_current[0], (double)trip_current[1], (double)trip_current[2], (double)trip_current[3],
-      (double)peak_current, (double)MOTOR_CONTROL_CAL_CURRENT_LIMIT_A, (double)MOTOR_CONTROL_CURRENT_LIMIT_A);
+      (double)peak_current, (double)MOTOR_CONTROL_CAL_CURRENT_LIMIT_A);
 }
 void MotorCalibration_Init(void)
 {
@@ -213,9 +216,8 @@ bool MotorCalibration_ProcessCommand(const char *command)
         MOTOR_CONTROL_CAL_VOLTAGE > MOTOR_CONTROL_VOLTAGE_LIMIT ||
         !isfinite(MOTOR_CONTROL_VOLTAGE_LIMIT) || MOTOR_CONTROL_VOLTAGE_LIMIT <= 0.0f ||
         !isfinite(MOTOR_CONTROL_PWM_MARGIN) || MOTOR_CONTROL_PWM_MARGIN < 0.05f || MOTOR_CONTROL_PWM_MARGIN >= 0.5f ||
-        !isfinite(MOTOR_CONTROL_CAL_CURRENT_LIMIT_A) || !isfinite(MOTOR_CONTROL_CURRENT_LIMIT_A) ||
-        MOTOR_CONTROL_CAL_CURRENT_LIMIT_A <= 0.0f || MOTOR_CONTROL_CURRENT_LIMIT_A <= 0.0f ||
-        MOTOR_CONTROL_CAL_CURRENT_LIMIT_A > MOTOR_CONTROL_CURRENT_LIMIT_A ||
+        /* 校正閾値は独立。通常運転閾値より大きくても有効とする。 */
+        !isfinite(MOTOR_CONTROL_CAL_CURRENT_LIMIT_A) || MOTOR_CONTROL_CAL_CURRENT_LIMIT_A <= 0.0f ||
         !isfinite(MOTOR_CONTROL_KV_RPM_PER_VOLT) || MOTOR_CONTROL_KV_RPM_PER_VOLT <= 0.0f ||
         MOTOR_CONTROL_CAL_RAMP_MS == 0U || MOTOR_CONTROL_CAL_SWEEP_MS == 0U ||
         MOTOR_CONTROL_CAL_HOLD_MS < 300U || MOTOR_CONTROL_POLE_PAIRS == 0U) {
@@ -224,6 +226,7 @@ bool MotorCalibration_ProcessCommand(const char *command)
     /* 新しい校正の途中で失敗したら、古いRAM結果に戻して運転を許可しない。 */
     calibrated = false; saved = false; fault = NULL; energized = false;
     trip_captured = false; peak_current = requested_voltage = 0.0f;
+    for (unsigned i=0; i<4; i++) observed_current[i] = 0.0f;
     previous_angle = position = sample.mechanical_rad; sequence = sample.sequence;
     task_ms = HAL_GetTick(); heartbeat = task_ms;
     Enter(CHECK_STILL, task_ms);
@@ -256,13 +259,25 @@ void MotorCalibration_Task(void)
   }
   uint32_t elapsed = now-stage_ms;
   float angle = 0.0f, volts = MOTOR_CONTROL_CAL_VOLTAGE;
-  bool holding = stage == CHECK_STILL || stage == HOLD_ZERO || stage == HOLD_END || stage == HOLD_RETURN;
+  bool holding = stage == CHECK_STILL || stage == HOLD_ZERO || stage == HOLD_END || stage == HOLD_RETURN || stage == HOLD_APPROACH;
   /* holdの最後200msを平均。移動中や振動中の一発読みでoffsetを確定しない。 */
   if (holding && fresh && elapsed + 200U >= MOTOR_CONTROL_CAL_HOLD_MS) {
     sum += position; count++;
     minimum = fminf(minimum,position); maximum = fmaxf(maximum,position);
   }
   if (holding && elapsed >= MOTOR_CONTROL_CAL_HOLD_MS) {
+    /* 保持終了点を比較し、位置依存誤差と往復の位置ずれを切り分ける。
+     * 電流は直近1組のスナップショット。平均角は最後200msの値。 */
+    float currents[4];
+    uint32_t mask = __get_PRIMASK(); __disable_irq();
+    for (unsigned i=0; i<4; i++) currents[i] = observed_current[i];
+    __set_PRIMASK(mask);
+    printf("Cal endpoint: stage=%u, mech=%.6f rad, span_e=%.6f rad, n=%u, "
+           "vd=%.3f V, U1=%.3f V=%.3f U2=%.3f W=%.3f A\r\n",
+           (unsigned)stage, (double)(count ? sum/(float)count : position),
+           (double)((maximum-minimum)*MOTOR_CONTROL_POLE_PAIRS), count,
+           (double)(energized ? requested_voltage : 0.0f),
+           (double)currents[0], (double)currents[1], (double)currents[2], (double)currents[3]);
     if (count < 20U || (maximum-minimum)*MOTOR_CONTROL_POLE_PAIRS > MOTOR_CONTROL_CAL_POSITION_TOLERANCE_RAD) {
       MotorCalibration_TripISR("rotor not settled"); Finish(fault); return;
     }
@@ -274,6 +289,15 @@ void MotorCalibration_Task(void)
       energized = true; Enter(RAMP,HAL_GetTick());
       return; /* 最初はゼロ電圧。次のtaskからramp。 */
     } else if (stage == HOLD_ZERO) {
+      /* 静止状態からの引き込みは進入方向が不定。復路と同じ負方向から
+       * 1電気回転かけて整列し直し、摩擦等による停止位置の差を減らす。
+       * この間も電流/角度/VMの監視とstop受付は通常の校正と同じ。 */
+      approach_start = mean; Enter(APPROACH,now);
+    } else if (stage == HOLD_APPROACH) {
+      float expected = TWO_PI/MOTOR_CONTROL_POLE_PAIRS;
+      if (fabsf(fabsf(mean-approach_start)-expected) > expected*MOTOR_CONTROL_CAL_MOTION_TOLERANCE) {
+        MotorCalibration_TripISR("prealignment travel mismatch"); Finish(fault); return;
+      }
       origin = mean; Enter(FORWARD,now);
     } else if (stage == HOLD_END) {
       end_position = mean;
@@ -301,7 +325,11 @@ void MotorCalibration_Task(void)
     float fraction = fminf(1.0f,(float)elapsed/MOTOR_CONTROL_CAL_RAMP_MS);
     volts *= fraction;
     if (elapsed >= MOTOR_CONTROL_CAL_RAMP_MS) Enter(HOLD_ZERO,now);
-  } else if (stage == FORWARD) {
+  } else if (stage == APPROACH) {
+    angle = -TWO_PI*fminf(1.0f,(float)elapsed/MOTOR_CONTROL_CAL_SWEEP_MS);
+    if (elapsed >= MOTOR_CONTROL_CAL_SWEEP_MS) Enter(HOLD_APPROACH,now);
+  } else if (stage == HOLD_APPROACH) angle = -TWO_PI;
+  else if (stage == FORWARD) {
     angle = TWO_PI*fminf(1.0f,(float)elapsed/MOTOR_CONTROL_CAL_SWEEP_MS);
     if (elapsed >= MOTOR_CONTROL_CAL_SWEEP_MS) Enter(HOLD_END,now);
   } else if (stage == HOLD_END) angle = TWO_PI;

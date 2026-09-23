@@ -13,11 +13,13 @@
 /* モーター交換・相配線変更時はIDを変更し、必ず手動で再校正する。 */
 #define MOTOR_CONTROL_MOTOR_ID                     1U
 #define MOTOR_CONTROL_KV_RPM_PER_VOLT               140.0f
-/* 定格不明のため、以下は実験用保護値。KVから許容電流は推定しない。 */
+/* 定格不明のため、以下は実験用保護値。KVから許容電流は推定しない。
+ * CURRENT_LIMIT_Aは将来のFOC通常運転用。校正にはCAL_CURRENT_LIMIT_Aを使う。
+ * いずれも電流指令値ではなく、超過時に出力を停止する閾値。 */
 #define MOTOR_CONTROL_CURRENT_LIMIT_A              5.0f
-#define MOTOR_CONTROL_CAL_CURRENT_LIMIT_A          5.0f
-/* N5065実測：1Vへのramp中、約0.70Vで5Aに到達。0.4Vで校正完走を確認。 */
-#define MOTOR_CONTROL_CAL_VOLTAGE                   0.4f
+#define MOTOR_CONTROL_CAL_CURRENT_LIMIT_A          10.0f
+/* N5065実測：1V/10Aで7回完走、最大約8.41A。通常運転用5Aとは独立。 */
+#define MOTOR_CONTROL_CAL_VOLTAGE                   1.0f
 #define MOTOR_CONTROL_VM_MIN_VOLTS                 6.0f
 #define MOTOR_CONTROL_VOLTAGE_LIMIT                 3.0f
 #define MOTOR_CONTROL_PWM_MARGIN                   0.05f
