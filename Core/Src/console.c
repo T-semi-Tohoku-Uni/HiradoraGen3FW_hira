@@ -42,18 +42,28 @@ static void (*block_done)(bool success);
 /*
  * UART受信用の変数です。
  *
- * rx_byte             : 割り込みで1文字受け取る場所
+ * rx_blocks           : HALが受信する交互バッファ
  * rx_line_buffer      : 改行までの文字列を保存する場所
  * rx_line_length      : 現在保存されている文字数
- * is_rx_line_ready    : 1行分の受信が完了したことを示すフラグ
+ * rx_head/rx_tail     : 完成行キューの書込み/読出し位置
  * is_rx_line_overflow : 受信文字列が長すぎたことを示すフラグ
  */
-static uint8_t rx_byte;
+/* HALのReceiveToIdleで複数バイトを受ける。1文字ごとの再設定を避ける。
+ * コールバックで次のバッファへ切り替え、完了側を解析する間も受信を継続。 */
+static uint8_t rx_blocks[2][64];
+static uint8_t rx_slot;
+static void Console_StartReceive(void);
 static volatile uint32_t rx_errors;
 static volatile uint32_t rx_overruns;
 static char rx_line_buffer[CONSOLE_RX_LINE_SIZE];
 static volatile uint16_t rx_line_length;
-static volatile uint8_t is_rx_line_ready;
+/* ISRが完成行を追加しmainが取り出す。処理中も次の行を受信できる。
+ * 1スロットを空けるSPSC方式で8行保持。満杯時は行全体を捨て、件数を公開。 */
+#define RX_QUEUE_SLOTS 9U
+static char rx_lines[RX_QUEUE_SLOTS][CONSOLE_RX_LINE_SIZE];
+static uint16_t rx_lengths[RX_QUEUE_SLOTS];
+static volatile uint8_t rx_head, rx_tail;
+static volatile uint32_t rx_queue_drops, rx_long_lines, rx_error_flags;
 static volatile uint8_t is_rx_line_overflow;
 
 /**
@@ -137,7 +147,8 @@ void Console_Init(UART_HandleTypeDef *huart)
   current_dma_length = 0U;
   is_dma_transmitting = 0U;
   rx_line_length = 0U;
-  is_rx_line_ready = 0U;
+  rx_head = rx_tail = 0U;
+  rx_queue_drops = rx_long_lines = rx_error_flags = 0U;
   is_rx_line_overflow = 0U;
 
   if (interrupt_state == 0U)
@@ -145,10 +156,10 @@ void Console_Init(UART_HandleTypeDef *huart)
     __enable_irq();
   }
 
-  /* 最初の1文字を割り込みで受信する準備をします。 */
+  /* FIFOを使い、最大64バイトまたはIDLEまでをHALで受信する。 */
   if (console_uart != NULL)
   {
-    (void)HAL_UART_Receive_IT(console_uart, &rx_byte, 1U);
+    Console_StartReceive();
   }
 }
 
@@ -243,54 +254,19 @@ size_t Console_Write(const void *data, size_t length)
  */
 bool Console_ReadLine(char *destination, size_t destination_size)
 {
-  uint16_t received_length;
-  uint32_t interrupt_state;
-  bool has_received_line = false;
-
-  if ((destination == NULL) || (destination_size == 0U))
-  {
-    return false;
-  }
-
-  /*
-   * 受信完了割り込みがバッファを書き換えないようにしてから、
-   * 完成した1行を呼び出し元のバッファへコピーします。
-   */
-  interrupt_state = __get_PRIMASK();
-  __disable_irq();
-
-  if (is_rx_line_ready != 0U)
-  {
-    received_length = rx_line_length;
-
-    /* ready中はISRがこの行を書き換えない。長いコピーは排他の外で行う。 */
-    __set_PRIMASK(interrupt_state);
-
-    if ((size_t)received_length < destination_size)
-    {
-      memcpy(destination, rx_line_buffer, received_length);
-      destination[received_length] = '\0';
-    }
-    else
-    {
-      /* コピー先が小さい場合は、途中までの危険な値を返しません。 */
-      destination[0] = '\0';
-    }
-
-    /* 読み出しが終わったため、次の1行を受信できる状態へ戻します。 */
-    __disable_irq();
-    rx_line_length = 0U;
-    is_rx_line_ready = 0U;
-    is_rx_line_overflow = 0U;
-    has_received_line = true;
-  }
-
-  if (interrupt_state == 0U)
-  {
-    __enable_irq();
-  }
-
-  return has_received_line;
+  if (!destination || !destination_size) return false;
+  uint8_t tail=rx_tail;
+  if (tail==rx_head) return false;
+  __DMB();
+  /* tailを進めるまではISRはこのスロットを上書きしない。コピー中のIRQ禁止は不要。 */
+  uint16_t length=rx_lengths[tail];
+  if (length<destination_size) {
+    memcpy(destination,rx_lines[tail],length);
+    destination[length]='\0';
+  } else destination[0]='\0';
+  __DMB();
+  rx_tail=(tail+1U==RX_QUEUE_SLOTS) ? 0U : tail+1U;
+  return true;
 }
 
 void Console_Process(float *received_value)
@@ -423,54 +399,44 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
   Console_StartTransmit();
 }
 
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+static void Console_StartReceive(void)
 {
-  if (huart != console_uart)
-  {
-    return;
-  }
-
-  /* 解析の前に受信を再開し、受信不能な時間を短縮する。 */
-  const uint8_t received_byte = rx_byte;
-  (void)HAL_UART_Receive_IT(console_uart, &rx_byte, 1U);
-
-  /*
-   * 1行をmain側が読み出すまでは、次のコマンドを保存しません。
-   * 今回は同時に複数行を送らない前提なので、1行バッファで十分です。
-   */
-  if (is_rx_line_ready == 0U)
-  {
-    if ((received_byte == '\r') || (received_byte == '\n'))
-    {
-      /* 空行は無視し、1文字以上受信した場合だけ受信完了とします。 */
-      if ((rx_line_length > 0U) || (is_rx_line_overflow != 0U))
-      {
-        if (is_rx_line_overflow != 0U)
-        {
-          /* 長すぎる行は空文字列にして、main側で入力エラーにします。 */
-          rx_line_length = 0U;
-        }
-
-        rx_line_buffer[rx_line_length] = '\0';
-        is_rx_line_ready = 1U;
+  if (HAL_UARTEx_ReceiveToIdle_IT(console_uart,rx_blocks[rx_slot],sizeof(rx_blocks[0]))!=HAL_OK)
+    rx_errors++;
+}
+static void Console_ReceiveByte(uint8_t received_byte)
+{
+  if (received_byte=='\r' || received_byte=='\n') {
+    if (rx_line_length || is_rx_line_overflow) {
+      uint8_t head=rx_head;
+      uint8_t next=(head+1U==RX_QUEUE_SLOTS) ? 0U : head+1U;
+      if (next==rx_tail) rx_queue_drops++;
+      else {
+        uint16_t length=is_rx_line_overflow ? 0U : rx_line_length;
+        memcpy(rx_lines[head],rx_line_buffer,length);
+        rx_lengths[head]=length;
+        __DMB();
+        rx_head=next;
       }
+      rx_line_length=0U; is_rx_line_overflow=0U;
     }
-    else if (is_rx_line_overflow == 0U)
-    {
-      if (rx_line_length < (CONSOLE_RX_LINE_SIZE - 1U))
-      {
-        rx_line_buffer[rx_line_length] = (char)received_byte;
-        rx_line_length++;
-      }
-      else
-      {
-        /* バッファに収まらない残りの文字は、改行まで読み捨てます。 */
-        is_rx_line_overflow = 1U;
-      }
-    }
+  } else if (!is_rx_line_overflow) {
+    if (rx_line_length<CONSOLE_RX_LINE_SIZE-1U)
+      rx_line_buffer[rx_line_length++]=(char)received_byte;
+    else { is_rx_line_overflow=1U; rx_long_lines++; }
   }
+}
 
-  /* 次の受信はコールバック先頭ですでに再開済み。 */
+void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart,uint16_t size)
+{
+  if(huart!=console_uart) return;
+  /* HALはエラーIRQでも受信完了を先に通知する場合がある。
+   * ここで再受信するとErrorCodeが消えるので、異常時はErrorCallbackへ任せる。 */
+  if(huart->ErrorCode!=HAL_UART_ERROR_NONE) return;
+  uint8_t completed=rx_slot;
+  rx_slot^=1U;
+  Console_StartReceive();
+  for(uint16_t i=0;i<size && i<sizeof(rx_blocks[0]);i++) Console_ReceiveByte(rx_blocks[completed][i]);
 }
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
@@ -480,6 +446,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
     return;
   }
   rx_errors++;
+  rx_error_flags |= huart->ErrorCode;
   if ((huart->ErrorCode & HAL_UART_ERROR_ORE) != 0U) rx_overruns++;
 
   /* HAL has stopped the transfer on a DMA error. RX framing/overrun
@@ -493,25 +460,21 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
     Console_StartTransmit();
   }
 
-  /* UARTエラーを含んだ入力途中の行は破棄します。 */
-  if (is_rx_line_ready == 0U)
-  {
-    rx_line_length = 0U;
-    /* 壊れた行の後半を別の有効コマンドとして実行しない。 */
-    is_rx_line_overflow = 1U;
-  }
+  /* 完成済みの行は保持し、エラーを含む作成中の行だけ改行まで破棄する。 */
+  rx_line_length=0U;
+  is_rx_line_overflow=1U;
 
-  /* オーバーランなどで受信が停止した場合だけ、割り込み受信を再開します。 */
-  if (huart->RxState == HAL_UART_STATE_READY)
-  {
-    (void)HAL_UART_Receive_IT(console_uart, &rx_byte, 1U);
-  }
+  /* 壊れたFIFO/途中バッファを残さず、RXだけを停止・再開する。TX DMAは維持。 */
+  (void)HAL_UART_AbortReceive(console_uart);
+  __HAL_UART_SEND_REQ(console_uart, UART_RXDATA_FLUSH_REQUEST);
+  Console_StartReceive();
 }
 
 bool Console_ProcessCommand(const char *command)
 {
   if (command == NULL || strcmp(command, "serial status") != 0) return false;
-  printf("Serial RX: errors=%lu, overrun=%lu\r\n",
-         (unsigned long)rx_errors, (unsigned long)rx_overruns);
+  printf("Serial RX: errors=%lu, overrun=%lu, queue_drops=%lu, long_lines=%lu, flags=0x%lX\r\n",
+         (unsigned long)rx_errors,(unsigned long)rx_overruns,
+         (unsigned long)rx_queue_drops,(unsigned long)rx_long_lines,(unsigned long)rx_error_flags);
   return true;
 }

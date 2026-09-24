@@ -129,18 +129,27 @@ void DmaLogger_Task(void)
     const uint64_t time_us = elapsed_samples * sample_period_ns / 1000U;
     const unsigned long ms = (uint32_t)(time_us / 1000U);
     const unsigned int fraction = (unsigned int)(time_us % 1000U);
-    /* Standard Teleplot serial lines. Timestamp is acquisition time in ms.
-     * Leading newline also terminates a line truncated by a TX DMA error. */
+    /* ISRはraw記録だけ。mainの文字列整形も%fを使わず整数mAへ丸める。
+     * Teleplotのキー・ms時刻・A単位/小数3桁は維持し、200Hz時のCPU負荷を減らす。 */
+    int32_t ma[4];
+    uint32_t magnitude[4];
+    const char *sign[4];
+    for (unsigned i=0;i<4;i++) {
+      float value=((float)sample->raw[i]-zero_offsets[i])*scale*1000.0f;
+      ma[i]=(int32_t)(value+(value<0.0f ? -0.5f : 0.5f));
+      sign[i]=ma[i]<0 ? "-" : "";
+      magnitude[i]=(uint32_t)(ma[i]<0 ? -ma[i] : ma[i]);
+    }
     const int length = snprintf(tx_text, sizeof(tx_text),
-      "\n>u1_a:%lu.%03u:%.3f\n>v_a:%lu.%03u:%.3f\n"
-      ">u2_a:%lu.%03u:%.3f\n>w_a:%lu.%03u:%.3f\n"
+      "\n>u1_a:%lu.%03u:%s%lu.%03lu\n>v_a:%lu.%03u:%s%lu.%03lu\n"
+      ">u2_a:%lu.%03u:%s%lu.%03lu\n>w_a:%lu.%03u:%s%lu.%03lu\n"
       ">sector:%lu.%03u:%u\n>sample:%lu\n>log_overrun:%lu\n",
-      ms, fraction, (double)(((float)sample->raw[0] - zero_offsets[0]) * scale),
-      ms, fraction, (double)(((float)sample->raw[1] - zero_offsets[1]) * scale),
-      ms, fraction, (double)(((float)sample->raw[2] - zero_offsets[2]) * scale),
-      ms, fraction, (double)(((float)sample->raw[3] - zero_offsets[3]) * scale),
-      ms, fraction, (unsigned int)sample->sector,
-      (unsigned long)sample->sequence, (unsigned long)overruns);
+      ms,fraction,sign[0],(unsigned long)(magnitude[0]/1000U),(unsigned long)(magnitude[0]%1000U),
+      ms,fraction,sign[1],(unsigned long)(magnitude[1]/1000U),(unsigned long)(magnitude[1]%1000U),
+      ms,fraction,sign[2],(unsigned long)(magnitude[2]/1000U),(unsigned long)(magnitude[2]%1000U),
+      ms,fraction,sign[3],(unsigned long)(magnitude[3]/1000U),(unsigned long)(magnitude[3]%1000U),
+      ms,fraction,(unsigned int)sample->sector,
+      (unsigned long)sample->sequence,(unsigned long)overruns);
     if (length <= 0 || (size_t)length >= sizeof(tx_text)) {
       Transmitted(false);
       return;

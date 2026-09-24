@@ -21,6 +21,8 @@ static CalibrationRecord calibration;
 static volatile float target_d, target_q, applied_d, applied_q;
 static volatile float vm_cache, electrical, rpm, measured_d, measured_q, peak;
 static volatile uint32_t heartbeat, current_tick, started_ms, ticks, compute_max, total_max, age_max;
+static volatile uint32_t adc_complete_cycles;
+static volatile bool adc_completed;
 static uint32_t last_tick_cycles, angle_sequence, angle_cycles, reverse_since;
 static float previous_angle;
 /* 静止判定はmainで継続観測。停止指令を出しただけでは再始動を許可しない。 */
@@ -70,6 +72,33 @@ static float Approach(float value,float goal,float step)
   if (goal>value) { float next=value+step; return next<goal ? next : goal; }
   float next=value-step; return next>goal ? next : goal;
 }
+/* ADCが止まるとADC内の監視も止まるため、TIM更新IRQから別途呼ぶ。 */
+void FocVoltage_WatchdogISR(void)
+{
+  if (!active || fault) return;
+  uint32_t now=HAL_GetTick();
+  /* bootstrap/I2C準備中にはまだADCを開始していない。最初の有効ADCまで
+   * 開始用期限で監視し、運転中の2ms監視を誤適用しない。 */
+  if (!running && !adc_seen) {
+    if ((uint32_t)(now-started_ms)>MOTOR_CONTROL_FOC_MAIN_TIMEOUT_MS)
+      FocVoltage_TripISR("arming watchdog");
+    return;
+  }
+  if ((uint32_t)(now-heartbeat)>MOTOR_CONTROL_FOC_MAIN_TIMEOUT_MS)
+    FocVoltage_TripISR("main stale");
+  else if ((uint32_t)(now-current_tick)>2U)
+    FocVoltage_TripISR("ADC stale");
+  else if (running && adc_completed &&
+      (uint32_t)(DWT->CYCCNT-adc_complete_cycles)>SystemCoreClock/10000U)
+    FocVoltage_TripISR("ADC control period missed");
+  else if (HAL_GPIO_ReadPin(GPIOE,GPIO_PIN_15)==GPIO_PIN_RESET)
+    FocVoltage_TripISR("gate driver nFAULT");
+}
+void FocVoltage_AdcCompleteISR(void)
+{
+  adc_complete_cycles=DWT->CYCCNT;
+  adc_completed=true;
+}
 void FocVoltage_TickISR(void)
 {
   if (!running) {
@@ -115,7 +144,7 @@ void FocVoltage_TickISR(void)
                               sample.mechanical_rad-calibration.offset);
   /* UVW座標で負の相順ならqも反転し、encoder増加方向のトルクを正にする。
    * 初版は角度外挿なし。前周期の取得角を使用し、古さを監視する。
-   * CCRはこのISR後、次の底で反映（RCR=1）。センサー内部遅延は別途存在する。 */
+   * CCRはこのISR後、次の頂点で反映（RCR=1）。センサー内部遅延は別途存在する。 */
   if (!MotorControl_SetVoltage(electrical,applied_d,
       applied_q*(float)calibration.direction,vm_cache)) {
     FocVoltage_TripISR("voltage output rejected"); return;
@@ -195,26 +224,39 @@ void FocVoltage_Task(void)
     } else if ((uint32_t)(now-started_ms)>10U) FocVoltage_TripISR("acquisition start timeout");
   }
 }
-static void PrintStatus(void)
+static void PrintStatus(bool capture)
 {
-  /* 文字列整形中は割り込みを止めず、数値のコピーだけを排他する。 */
-  uint32_t mask=__get_PRIMASK(); __disable_irq();
-  float td=target_d,tq=target_q,d=applied_d,q=applied_q,e=electrical,speed=rpm,id=measured_d,iq=measured_q,p=peak;
-  uint32_t n=ticks,c=compute_max,t=total_max,a=age_max;
-  bool on=active,run=running; const char *why=fault;
-  __set_PRIMASK(mask);
+  static unsigned line;
+  static float td,tq,d,q,e,speed,id,iq,p;
+  static uint32_t n,c,t,a;
+  static bool on,run;
+  static const char *why;
+  if(capture) {
+    uint32_t mask=__get_PRIMASK(); __disable_irq();
+    td=target_d; tq=target_q; d=applied_d; q=applied_q; e=electrical;
+    speed=rpm; id=measured_d; iq=measured_q; p=peak;
+    n=ticks; c=compute_max; t=total_max; a=age_max;
+    on=active; run=running; why=fault;
+    __set_PRIMASK(mask);
+    line=1; return;
+  }
+  if(!line) return;
+  /* 1回のmainループで1行だけ送る。行間にVM取得とheartbeat更新を挟む。 */
   /* 周期割り込みの合間に多数の%fを整形するとmain監視期限を超える。
    * 状態表示はmV/mA/mradと整数nsへ変換し、printfの浮動小数点整形を避ける。 */
-  printf("FOC: %s, target=%ld/%ld mV, applied=%ld/%ld mV, elec=%ld mrad, rpm=%ld\r\n",
+  if(line==1) printf("FOC: %s, target=%ld/%ld mV, applied=%ld/%ld mV, elec=%ld mrad, rpm=%ld\r\n",
       on ? (run ? "running" : "arming/stopping") : "off",
       (long)(td*1000),(long)(tq*1000),(long)(d*1000),(long)(q*1000),(long)(e*1000),(long)speed);
-  printf("FOC current: id=%ld iq=%ld mA (ADC polarity), peak=%ld mA; fault=%s\r\n",
+  else if(line==2) printf("FOC current: id=%ld iq=%ld mA (ADC polarity), peak=%ld mA; fault=%s\r\n",
       (long)(id*1000),(long)(iq*1000),(long)(p*1000),why ? why : "none");
-  printf("FOC timing: ticks=%lu, compute_max=%lu ns, bottom_max=%lu ns, angle_age_max=%lu ns\r\n",
+  else if(line==3) printf("FOC timing: ticks=%lu, compute_max=%lu ns, adc_control_max=%lu ns, angle_age_max=%lu ns\r\n",
       (unsigned long)n,(unsigned long)((float)c*(1e9f/(float)SystemCoreClock)),
       (unsigned long)((float)t*(1e9f/(float)SystemCoreClock)),
       (unsigned long)((float)a*(1e9f/(float)SystemCoreClock)));
+  else MotorControl_PrintFocPhase();
+  line=line==4 ? 0 : line+1;
 }
+void FocVoltage_ReportTask(void) { PrintStatus(false); }
 bool FocVoltage_ProcessCommand(const char *command)
 {
   if (!command) return false;
@@ -223,7 +265,7 @@ bool FocVoltage_ProcessCommand(const char *command)
       tolower((unsigned char)command[1])!='o' || tolower((unsigned char)command[2])!='c' ||
       (command[3] && !isspace((unsigned char)command[3]))) return false;
   const char *arg=command+3; while (isspace((unsigned char)*arg)) arg++;
-  if (!*arg || Same(arg,"status")) PrintStatus();
+  if (!*arg || Same(arg,"status")) PrintStatus(true);
   else if (Same(arg,"stop")) FocVoltage_TripISR("user stop");
   else if (Same(arg,"start")) {
     if (active || MotorCalibration_IsActive() || !MotorControl_IsStopped() || CurrentSense_IsBusy()) {
@@ -239,7 +281,7 @@ bool FocVoltage_ProcessCommand(const char *command)
       printf("FOC start blocked: wait for stationary rotor\r\n"); return true;
     }
     if (target_q==0.0f) { printf("Set nonzero Vq with foc voltage <Vd> <Vq> first\r\n"); return true; }
-    fault=NULL; active=true; running=false; adc_seen=false;
+    fault=NULL; active=true; running=false; adc_seen=false; adc_completed=false;
     applied_d=applied_q=peak=rpm=measured_d=measured_q=0.0f;
     ticks=compute_max=total_max=age_max=reverse_since=0;
     angle_sequence=sample.sequence; vm_cache=vm.volts;

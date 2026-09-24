@@ -10,7 +10,7 @@
 #define REG_DIAG 0x3FFCU
 #define REG_ERROR 0x0001U
 #define TWO_PI 6.2831853071795864769f
-typedef enum { OFF, IDLE, REQUEST, RESPONSE, FAILED, RECOVERING } TransferState;
+typedef enum { OFF, IDLE, REQUEST, RESPONSE, FAILED, RECOVERING, DECODING } TransferState;
 static SPI_HandleTypeDef *encoder_spi;
 static TIM_HandleTypeDef *sample_timer;
 static DMA_Channel_TypeDef *rx_dma, *tx_dma;
@@ -167,6 +167,9 @@ void AS5047P_Tick(void)
 static void FrameComplete(void)
 {
   if (state != REQUEST && state != RESPONSE) return;
+  /* 応答のDMAは既に完了。以降のCPU処理は転送タイムアウトと区別する。
+   * 高優先度ISRに中断されても、FOCの角度鮮度監視は独立して継続する。 */
+  if (state == RESPONSE) state = DECODING;
   uint16_t response = rx_word;
   /* BSY解除を確認済み。各16bitの間でCSをHighに戻す。 */
   DelayUs();
@@ -177,7 +180,7 @@ static void FrameComplete(void)
     StartFrame(0U); /* NOPが前フレームの要求に対応するデータを返す。 */
     return;
   }
-  if (state != RESPONSE) return;
+  if (state != DECODING) return;
   uint32_t received = DWT->CYCCNT;
   transfer_cycles = received - start_cycles;
   if (transfer_cycles > max_transfer_cycles) max_transfer_cycles = transfer_cycles;
@@ -203,13 +206,13 @@ static void FrameComplete(void)
     sample->electrical_rad = (float)(((uint32_t)raw * MOTOR_CONTROL_POLE_PAIRS) & 0x3FFFU) * (TWO_PI / 16384.0f);
     sample->request_cycles = start_cycles; sample->received_cycles = received;
     sample->updated_ms = HAL_GetTick(); sample->sequence = latest.sequence + 1U;
-    sample->valid = diagnostic_ok && state == RESPONSE;
+    sample->valid = diagnostic_ok && state == DECODING;
     __DMB();
     published = next;
     IrqTrace_Event(TRACE_PUBLISH);
   }
   __DMB();
-  if (state == RESPONSE) state = IDLE;
+  if (state == DECODING) state = IDLE;
 }
 bool AS5047P_GetSample(AS5047P_Sample *sample)
 {

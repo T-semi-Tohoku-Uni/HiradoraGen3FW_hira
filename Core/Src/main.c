@@ -286,6 +286,7 @@ int main(void)
     AS5047P_Task();
     MotorCalibration_Task();
     FocVoltage_Task();
+    FocVoltage_ReportTask();
 
     if (Console_ReadLine(motor_command, sizeof(motor_command)))
     {

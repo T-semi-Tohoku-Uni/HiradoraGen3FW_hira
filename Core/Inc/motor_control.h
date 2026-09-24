@@ -60,9 +60,12 @@ void MotorControl_Stop(void);
  * from the ADC interrupt.
  */
 uint8_t MotorControl_GetSector(void);
-/* CEN=0かつ全モーター出力OFF専用。底から上向きに再始動する準備。 */
+/* CEN=0かつ全モーター出力OFF専用。FOCは頂点下降、それ以外は底上昇で再始動。 */
 HAL_StatusTypeDef MotorControl_ResetTimerPhase(TIM_HandleTypeDef *timer);
-/* 校正/FOC共通の電圧モード。RCR=1必須。3相CCRは次の底で反映。 */
+/* 校正/FOC共通の電圧モード。RCR=1必須。3相CCRはFOCで次の頂点、校正で次の底に反映。 */
+void MotorControl_FocAdcISR(void);
+void MotorControl_FocAdcBeginISR(void);
+void MotorControl_PrintFocPhase(void);
 bool MotorControl_IsStopped(void);
 bool MotorControl_IsVoltageMode(void);
 HAL_StatusTypeDef MotorControl_StartVoltage(void);

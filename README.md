@@ -27,4 +27,13 @@ FOC追加版はRelease/Debugビルド確認済み。Releaseで±0.4 Vの正逆�
 
 PWM反映を20 kHz（1周期に1回）へ変更する対応を追加しました。
 TIM1のRepetition Counter=1へのCubeMX変更・再生成を確認済みです。
-Releaseで正逆回転・100 Hzログ・再始動を確認しました。Debugはencoder invalidで停止したため、FOCは当面Releaseを使用してください。
+ADC完了を起点に電流処理→FOC→エンコーダー取得を直列化し、FOC時のPWM反映を頂点へ変更しました。
+Release/Debugで正逆回転・再始動を確認済み。Releaseでは100 Hzログ併用とADC停止時の独立監視も確認しました。
+Debugは周期処理を一部-O2でビルドします。エンコーダー取得の要求見送りが残るため、時間余裕の評価は継続が必要です。
+
+UART受信をHAL ReceiveToIdle_IT＋8行キューへ変更し、ADCログの文字列整形を軽量化しました。
+Release実機でFOC中の約200 Hzログ4,093点と、文字間待ちなしの3指令一括送信×20回を欠落なく確認しました。
+[2026-09-25のUART・ADCログ試験](docs/uart_adc_test_2026-09-25.md)を参照してください。
+
+Release実機で5分連続運転＋20回の起動停止を確認し、通信エラー・ADCログ欠落・保護停止はありませんでした。
+[連続運転・起動停止の試験記録](docs/foc_endurance_test_2026-09-25.md)を参照してください。

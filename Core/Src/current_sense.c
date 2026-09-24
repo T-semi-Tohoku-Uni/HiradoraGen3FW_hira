@@ -442,6 +442,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
    * Also confirm ADC2 JEOS before reading all four result registers. This
    * avoids relying on the one-shot slave HAL interrupt.
    */
+  MotorControl_FocAdcBeginISR();
   wait_count = CURRENT_SENSE_SLAVE_WAIT_LOOP_LIMIT;
   while ((__HAL_ADC_GET_FLAG(adc_slave, ADC_FLAG_JEOS) == 0U) &&
          (wait_count > 0U))
@@ -491,6 +492,8 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
     MotorCalibration_CurrentISR(currents, rails);
     FocVoltage_CurrentISR(currents, rails);
   }
+  /* 電流取得/保護後にFOC→CCR→次回角度DMAを直列に実行する。 */
+  MotorControl_FocAdcISR();
   last_sample_tick = HAL_GetTick();
   __HAL_ADC_CLEAR_FLAG(adc_slave, ADC_FLAG_JEOC | ADC_FLAG_JEOS);
 

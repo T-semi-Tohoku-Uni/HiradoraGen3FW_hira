@@ -78,6 +78,8 @@ static MotorControlPhase selected_phase = MOTOR_CONTROL_PHASE_U;
 static float selected_offset_percent;
 static volatile bool outputs_enabled;
 static volatile uint32_t voltage_compare[3];
+static volatile uint32_t foc_adc_began, foc_adc_phase, foc_update_cnt, foc_adc_cnt;
+static volatile bool foc_update_down, foc_adc_down;
 static volatile MotorControlMode motor_mode = MOTOR_CONTROL_MODE_STOPPED;
 static volatile uint8_t current_sector;
 static volatile uint32_t reference_rpm;
@@ -195,8 +197,8 @@ static void MotorControl_DelayMicroseconds(uint32_t microseconds)
   }
 }
 
-/* 停止中のタイマを「底から上向き」に戻す。RCR=1ではUGで反復カウンタを
- * 再ロードすると、頂点では更新せず、次の底で最初の更新イベントが発生する。
+/* 停止中のタイマの開始位相を揃える。FOCは頂点から下降、それ以外は底から上昇。
+ * RCR=1をUGで再ロードし、開始位置へ1往復して最初の更新イベントを発生させる。
  * 中央揃え動作中のDIRは読み取り専用のため、一時的にCMSを解除して方向を戻す。
  * これは再始動時の位相合わせのみ。CubeMXが指定したCMS/RCR/PSC/ARRは維持する。
  * 呼出し側はCEN=0、全モーター出力OFFを保証すること。 */
@@ -208,13 +210,18 @@ HAL_StatusTypeDef MotorControl_ResetTimerPhase(TIM_HandleTypeDef *timer)
     __set_PRIMASK(mask);
     return HAL_ERROR;
   }
+  /* FOCだけは頂点から下降して開始する。UGでRCR=1をロードし、最初の底を
+   * スキップして次の頂点でUEVを発生させる。校正/六ステップ/ADC単独は従来の底基準。 */
+  bool peak_start=FocVoltage_IsActive();
   uint32_t mode=timer->Instance->CR1 & TIM_CR1_CMS;
   CLEAR_BIT(timer->Instance->CR1, TIM_CR1_CMS);
-  CLEAR_BIT(timer->Instance->CR1, TIM_CR1_DIR);
+  MODIFY_REG(timer->Instance->CR1, TIM_CR1_DIR, peak_start ? TIM_CR1_DIR : 0U);
   SET_BIT(timer->Instance->CR1, mode);
   __HAL_TIM_SET_COUNTER(timer, 0U);
   /* HALのイベント生成APIでCCR/ARRと反復カウンタを初期化する。 */
   HAL_StatusTypeDef result=HAL_TIM_GenerateEvent(timer, TIM_EVENTSOURCE_UPDATE);
+  /* UGがCNTを初期化するため、開始位置はUGの後に指定する。 */
+  __HAL_TIM_SET_COUNTER(timer, peak_start ? __HAL_TIM_GET_AUTORELOAD(timer) : 0U);
   __HAL_TIM_CLEAR_FLAG(timer, TIM_FLAG_UPDATE | TIM_FLAG_CC4);
   __set_PRIMASK(mask);
   return result;
@@ -940,35 +947,25 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     return;
   }
 
-  /* RCR=1は底で1周期に1回更新。旧RCR=0の手動PWM/六ステップでは従来の
+  /* RCR=1は1周期に1回更新（FOCは頂点、それ以外は底）。旧RCR=0では従来の
    * 半周期割り込みを除外する。電圧モードは開始時にRCR=1を必須にする。 */
   if (motor_timer->Instance->RCR == 0U &&
       __HAL_TIM_GET_COUNTER(motor_timer) > (__HAL_TIM_GET_AUTORELOAD(motor_timer)/2U)) return;
 
-  uint32_t began = DWT->CYCCNT;
   MotorCalibration_WatchdogISR();
+  if (FocVoltage_IsActive()) {
+    /* FOC周期処理はADC完了へ移動。ADCが止まってもTIMは独立に停止を監視する。 */
+    foc_update_cnt=__HAL_TIM_GET_COUNTER(motor_timer);
+    foc_update_down=(motor_timer->Instance->CR1 & TIM_CR1_DIR)!=0U;
+    FocVoltage_WatchdogISR();
+    return;
+  }
   AS5047P_Tick();
-  FocVoltage_TickISR();
-  /* RCR=1: この底で前回CCRが反映済み。今回計算するCCRは次の底で反映する。
-   * 上り/下りを含む全周期の90%（現設定では約45us）までを許可し、残り5usを
-   * CCR書込み余裕にする。CNT位相にはISR入口の遅れも含まれる。
-   * UIF再成立は計算中に次周期へ到達したことを示すため、CNTが小さくても停止。
-   * 最後の判定と3相書込みを排他し、ADC割り込みによる途中の遅延を防ぐ。 */
-  uint32_t mask=__get_PRIMASK(); __disable_irq();
-  uint32_t arr=__HAL_TIM_GET_AUTORELOAD(motor_timer);
-  uint32_t count=__HAL_TIM_GET_COUNTER(motor_timer);
-  uint32_t phase=(motor_timer->Instance->CR1 & TIM_CR1_DIR) ? 2U*arr-count : count;
-  uint32_t elapsed=DWT->CYCCNT-began;
-  FocVoltage_CheckDeadlineISR(elapsed,
-      phase > (2U*arr-arr/5U) ||
-      __HAL_TIM_GET_FLAG(motor_timer,TIM_FLAG_UPDATE) != RESET ||
-      elapsed >= SystemCoreClock/control_tick_hz);
   if (MotorControl_IsVoltageMode()) {
     __HAL_TIM_SET_COMPARE(motor_timer, TIM_CHANNEL_1, voltage_compare[0]);
     __HAL_TIM_SET_COMPARE(motor_timer, TIM_CHANNEL_2, voltage_compare[1]);
     __HAL_TIM_SET_COMPARE(motor_timer, TIM_CHANNEL_3, voltage_compare[2]);
   }
-  __set_PRIMASK(mask);
   if (MotorControl_IsSixStepMode(motor_mode)) MotorControl_SixStepTick();
 }
 
@@ -1002,10 +999,63 @@ bool MotorControl_SetVoltage(float angle, float vd, float vq, float vm)
   for (unsigned i=0; i<3; i++) compare[i] = (uint32_t)(duty[i] *
       (float)(__HAL_TIM_GET_AUTORELOAD(motor_timer)+1U) + 0.5f);
   /* mainからCCRを直接更新すると更新イベントが3相の途中に来る可能性がある。
-   * RAMへ公開し、底ISRで全preloadを書き込む。RCR=1では次の底で実出力に反映。 */
+   * RAMへ公開する。FOCはADC ISRでpreloadへ書いて次の頂点で反映。
+   * 校正は従来どおり底ISRでpreloadへ書いて次の底で反映。 */
   uint32_t mask = __get_PRIMASK(); __disable_irq();
   bool enabled = MotorControl_IsVoltageMode();
   if (enabled) for (unsigned i=0; i<3; i++) voltage_compare[i] = compare[i];
   __set_PRIMASK(mask);
   return enabled;
+}
+
+/* ADC完了から呼ぶFOC専用周期処理。CH4立上りは下降時のARR-1付近なので、
+ * 2ランクの変換完了は頂点の後となる。CCR反映は次の頂点（1周期後）。 */
+void MotorControl_FocAdcISR(void)
+{
+  if (!FocVoltage_IsActive()) return;
+  uint32_t began=foc_adc_began;
+  uint32_t arr=__HAL_TIM_GET_AUTORELOAD(motor_timer);
+  uint32_t count;
+  uint32_t initial=foc_adc_phase;
+  FocVoltage_TickISR();
+  uint32_t mask=__get_PRIMASK(); __disable_irq();
+  count=__HAL_TIM_GET_COUNTER(motor_timer);
+  uint32_t phase=(motor_timer->Instance->CR1 & TIM_CR1_DIR) ? arr-count : arr+count;
+  /* タイマの頂点から90%以内。途中で次の頂点を越した場合も検出する。
+   * TIM IRQはADCと同優先度なので未処理UIFがあり得る。UIFではなく位相で判定。 */
+  FocVoltage_CheckDeadlineISR(DWT->CYCCNT-began,
+      phase > 2U*arr-arr/5U || phase<initial ||
+      (uint32_t)(DWT->CYCCNT-began)>=SystemCoreClock/control_tick_hz);
+  if (MotorControl_IsVoltageMode()) {
+    __HAL_TIM_SET_COMPARE(motor_timer,TIM_CHANNEL_1,voltage_compare[0]);
+    __HAL_TIM_SET_COMPARE(motor_timer,TIM_CHANNEL_2,voltage_compare[1]);
+    __HAL_TIM_SET_COMPARE(motor_timer,TIM_CHANNEL_3,voltage_compare[2]);
+  }
+  __set_PRIMASK(mask);
+  /* 出力を停止した後はmain側の低速取得に戻す。処理完了を監視側に通知する。 */
+  if (MotorControl_IsVoltageMode()) {
+    AS5047P_Tick();
+    FocVoltage_AdcCompleteISR();
+  }
+}
+
+/* ADCコールバック冒頭の位相と時刻を保存し、電流処理を含む締切を測る。 */
+void MotorControl_FocAdcBeginISR(void)
+{
+  if (!FocVoltage_IsActive()) return;
+  foc_adc_began=DWT->CYCCNT;
+  uint32_t arr=__HAL_TIM_GET_AUTORELOAD(motor_timer);
+  foc_adc_cnt=__HAL_TIM_GET_COUNTER(motor_timer);
+  foc_adc_down=(motor_timer->Instance->CR1 & TIM_CR1_DIR)!=0U;
+  foc_adc_phase=foc_adc_down ? arr-foc_adc_cnt : arr+foc_adc_cnt;
+}
+void MotorControl_PrintFocPhase(void)
+{
+  uint32_t mask=__get_PRIMASK(); __disable_irq();
+  uint32_t update=foc_update_cnt, adc=foc_adc_cnt;
+  bool ud=foc_update_down, ad=foc_adc_down;
+  __set_PRIMASK(mask);
+  printf("FOC phase: update CNT=%lu DIR=%u, ADC CNT=%lu DIR=%u (ARR=%lu)\r\n",
+      (unsigned long)update,ud,(unsigned long)adc,ad,
+      (unsigned long)__HAL_TIM_GET_AUTORELOAD(motor_timer));
 }
