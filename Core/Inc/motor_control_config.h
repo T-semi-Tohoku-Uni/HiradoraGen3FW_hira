@@ -14,7 +14,7 @@
 #define MOTOR_CONTROL_MOTOR_ID                     1U
 #define MOTOR_CONTROL_KV_RPM_PER_VOLT               140.0f
 /* 定格不明のため、以下は実験用保護値。KVから許容電流は推定しない。
- * CURRENT_LIMIT_Aは将来のFOC通常運転用。校正にはCAL_CURRENT_LIMIT_Aを使う。
+ * CURRENT_LIMIT_AはFOC通常運転用。校正にはCAL_CURRENT_LIMIT_Aを使う。
  * いずれも電流指令値ではなく、超過時に出力を停止する閾値。 */
 #define MOTOR_CONTROL_CURRENT_LIMIT_A              5.0f
 #define MOTOR_CONTROL_CAL_CURRENT_LIMIT_A          10.0f
@@ -29,6 +29,17 @@
 #define MOTOR_CONTROL_CAL_MOTION_TOLERANCE          0.20f
 #define MOTOR_CONTROL_CAL_POSITION_TOLERANCE_RAD    0.15f
 #define MOTOR_CONTROL_CAL_WATCHDOG_MS               20U
+
+/* dq電圧一定FOCの初期実験用。校正の10Aとは別に通常運転は5Aで保護。 */
+#define MOTOR_CONTROL_FOC_MAX_VOLTS                 0.5f
+#define MOTOR_CONTROL_FOC_SLEW_VOLTS_PER_SEC        0.5f
+#define MOTOR_CONTROL_FOC_MAX_RPM                   600.0f
+#define MOTOR_CONTROL_FOC_ANGLE_MAX_AGE_US          250U
+#define MOTOR_CONTROL_FOC_MAIN_TIMEOUT_MS          20U
+#define MOTOR_CONTROL_FOC_STANDSTILL_MS            300U
+#define MOTOR_CONTROL_FOC_STANDSTILL_RAD           0.02f
+/* ADCの符号は既存ログと同じ。dq表示は相電流極性を実機照合するまで参考値。 */
+#define MOTOR_CONTROL_FOC_CURRENT_POLARITY          1.0f
 
 /* Charge all three bootstrap capacitors before each PWM start. */
 #define MOTOR_CONTROL_BOOTSTRAP_CHARGE_US           750U

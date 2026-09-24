@@ -50,6 +50,10 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
+    Drivers/CMSIS/DSP/Source/ControllerFunctions/arm_sin_cos_f32.c
+    Drivers/CMSIS/DSP/Source/CommonTables/arm_common_tables.c
+    Core/Src/irq_trace.c
+    Core/Src/foc_voltage.c
     Core/Src/voltage_vector.c
     Core/Src/calibration_store.c
     Core/Src/motor_calibration.c
@@ -65,6 +69,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
+    Drivers/CMSIS/DSP/Include
     # Add user defined include paths
 )
 
@@ -87,3 +92,13 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
 
     # Add user defined libraries
 )
+
+# 20 kHz周期処理はサイズ優先(-Os)より実行時間を優先する。
+# Debugでも同じ演算経路を使うため、この3ファイルは-O2でビルドする。
+set_source_files_properties(
+    Core/Src/foc_voltage.c Core/Src/voltage_vector.c
+    Drivers/CMSIS/DSP/Source/ControllerFunctions/arm_sin_cos_f32.c
+    PROPERTIES COMPILE_OPTIONS "-O2")
+
+# 計測フックの負荷をDebugでも小さく保つ。
+set_source_files_properties(Core/Src/irq_trace.c PROPERTIES COMPILE_OPTIONS "-O2")

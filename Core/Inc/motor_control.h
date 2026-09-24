@@ -60,7 +60,9 @@ void MotorControl_Stop(void);
  * from the ADC interrupt.
  */
 uint8_t MotorControl_GetSector(void);
-/* 校正専用の電圧モード。計算はmain、3相CCRの反映はTIM1の底で行う。 */
+/* CEN=0かつ全モーター出力OFF専用。底から上向きに再始動する準備。 */
+HAL_StatusTypeDef MotorControl_ResetTimerPhase(TIM_HandleTypeDef *timer);
+/* 校正/FOC共通の電圧モード。RCR=1必須。3相CCRは次の底で反映。 */
 bool MotorControl_IsStopped(void);
 bool MotorControl_IsVoltageMode(void);
 HAL_StatusTypeDef MotorControl_StartVoltage(void);

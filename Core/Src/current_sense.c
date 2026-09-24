@@ -4,6 +4,7 @@
 #include "bus_voltage.h"
 #include "motor_control.h"
 #include "motor_calibration.h"
+#include "foc_voltage.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -106,9 +107,13 @@ static HAL_StatusTypeDef CurrentSense_StartAcquisition(uint32_t sample_count)
     CLEAR_BIT(sample_timer->Instance->BDTR, TIM_BDTR_MOE);
     CLEAR_BIT(sample_timer->Instance->CCER,
               CURRENT_SENSE_PWM_OUTPUT_MASK);
-    __HAL_TIM_SET_COUNTER(sample_timer, 0U);
-    sample_timer->Instance->EGR = TIM_EGR_UG;
-    __HAL_TIM_CLEAR_FLAG(sample_timer, TIM_FLAG_UPDATE | TIM_FLAG_CC4);
+    /* ADC単独運転でもRCR=1の更新位相を底へ揃える。 */
+    status=MotorControl_ResetTimerPhase(sample_timer);
+    if (status != HAL_OK) {
+      CLEAR_BIT(sample_timer->Instance->CCER, TIM_CCER_CC4E);
+      timer_started_for_capture=false;
+      return status;
+    }
     SET_BIT(sample_timer->Instance->BDTR, TIM_BDTR_MOE);
     SET_BIT(sample_timer->Instance->CR1, TIM_CR1_CEN);
   }
@@ -397,6 +402,7 @@ void CurrentSense_Task(void)
        (uint32_t)(HAL_GetTick() - sample_tick) >=
          CURRENT_SENSE_ACQUISITION_TIMEOUT_MS)) {
     MotorCalibration_TripISR("ADC acquisition error");
+    FocVoltage_TripISR("ADC acquisition error");
     printf("ADC logger stopped: synchronization error or trigger timeout\r\n");
     CurrentSense_EndStream();
   }
@@ -447,6 +453,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
   {
     __HAL_ADC_DISABLE_IT(adc_master, ADC_IT_JEOC | ADC_IT_JEOS);
     MotorCalibration_TripISR("ADC synchronization error");
+    FocVoltage_TripISR("ADC synchronization error");
     current_state = CURRENT_SENSE_SYNC_ERROR;
     return;
   }
@@ -482,6 +489,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
       if (raw[i] < 16U || raw[i] > 4079U) rails = true;
     }
     MotorCalibration_CurrentISR(currents, rails);
+    FocVoltage_CurrentISR(currents, rails);
   }
   last_sample_tick = HAL_GetTick();
   __HAL_ADC_CLEAR_FLAG(adc_slave, ADC_FLAG_JEOC | ADC_FLAG_JEOS);

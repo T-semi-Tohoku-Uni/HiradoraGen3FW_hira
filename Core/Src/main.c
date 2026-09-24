@@ -27,6 +27,7 @@
 #include "bus_voltage.h"
 #include "motor_control.h"
 #include "motor_calibration.h"
+#include "foc_voltage.h"
 #include "ntc.h"
 #include "stspin32g4.h"
 #include <ctype.h>
@@ -266,7 +267,7 @@ int main(void)
   AS5047P_Init(&hspi1, &htim1);
   MotorCalibration_Init();
   printf("Command: <offset>, u/v/w <offset>, mid, stop, start, "
-         "run cw/ccw <rpm>, status, adc [decimation], adc stop, adc status, vm, ntc, ntc stop, angle, angle stop, angle status, serial status, cal start/status/stop/save, fault, fault clear\r\n");
+         "run cw/ccw <rpm>, status, adc [decimation], adc stop, adc status, vm, ntc, ntc stop, angle, angle stop, angle status, serial status, foc voltage/start/status/stop, cal start/status/stop/save, fault, fault clear\r\n");
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -284,12 +285,14 @@ int main(void)
     NTC_Task();
     AS5047P_Task();
     MotorCalibration_Task();
+    FocVoltage_Task();
 
     if (Console_ReadLine(motor_command, sizeof(motor_command)))
     {
-      if (CurrentSense_IsBusy() || MotorCalibration_IsActive())
+      if (CurrentSense_IsBusy() || MotorCalibration_IsActive() || FocVoltage_IsActive())
       {
-        if (MotorCalibration_ProcessCommand(motor_command) ||
+        if (FocVoltage_ProcessCommand(motor_command) ||
+            MotorCalibration_ProcessCommand(motor_command) ||
             Console_ProcessCommand(motor_command) ||
             AS5047P_ProcessCommand(motor_command) ||
             BusVoltage_ProcessCommand(motor_command) ||
@@ -301,7 +304,8 @@ int main(void)
           printf("ADC logger busy; use 'adc stop', 'adc status', 'vm' or 'stop'\r\n");
         }
       }
-      else if (!MotorCalibration_ProcessCommand(motor_command) &&
+      else if (!FocVoltage_ProcessCommand(motor_command) &&
+               !MotorCalibration_ProcessCommand(motor_command) &&
                !Console_ProcessCommand(motor_command) &&
                !BusVoltage_ProcessCommand(motor_command) &&
                !ProcessGateDriverFaultCommand(motor_command) &&
@@ -771,7 +775,7 @@ static void MX_TIM1_Init(void)
   htim1.Init.CounterMode = TIM_COUNTERMODE_CENTERALIGNED1;
   htim1.Init.Period = 3999;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim1.Init.RepetitionCounter = 0;
+  htim1.Init.RepetitionCounter = 1;
   htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
   if (HAL_TIM_Base_Init(&htim1) != HAL_OK)
   {

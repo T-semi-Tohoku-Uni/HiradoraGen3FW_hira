@@ -2,6 +2,7 @@
 #include "as5047p.h"
 #include "voltage_vector.h"
 #include "motor_calibration.h"
+#include "foc_voltage.h"
 #include "stspin32g4.h"
 
 #include <ctype.h>
@@ -194,6 +195,31 @@ static void MotorControl_DelayMicroseconds(uint32_t microseconds)
   }
 }
 
+/* 停止中のタイマを「底から上向き」に戻す。RCR=1ではUGで反復カウンタを
+ * 再ロードすると、頂点では更新せず、次の底で最初の更新イベントが発生する。
+ * 中央揃え動作中のDIRは読み取り専用のため、一時的にCMSを解除して方向を戻す。
+ * これは再始動時の位相合わせのみ。CubeMXが指定したCMS/RCR/PSC/ARRは維持する。
+ * 呼出し側はCEN=0、全モーター出力OFFを保証すること。 */
+HAL_StatusTypeDef MotorControl_ResetTimerPhase(TIM_HandleTypeDef *timer)
+{
+  uint32_t mask=__get_PRIMASK(); __disable_irq();
+  if ((timer->Instance->CR1 & TIM_CR1_CEN) ||
+      (timer->Instance->CCER & MOTOR_CONTROL_OUTPUT_ENABLE_MASK)) {
+    __set_PRIMASK(mask);
+    return HAL_ERROR;
+  }
+  uint32_t mode=timer->Instance->CR1 & TIM_CR1_CMS;
+  CLEAR_BIT(timer->Instance->CR1, TIM_CR1_CMS);
+  CLEAR_BIT(timer->Instance->CR1, TIM_CR1_DIR);
+  SET_BIT(timer->Instance->CR1, mode);
+  __HAL_TIM_SET_COUNTER(timer, 0U);
+  /* HALのイベント生成APIでCCR/ARRと反復カウンタを初期化する。 */
+  HAL_StatusTypeDef result=HAL_TIM_GenerateEvent(timer, TIM_EVENTSOURCE_UPDATE);
+  __HAL_TIM_CLEAR_FLAG(timer, TIM_FLAG_UPDATE | TIM_FLAG_CC4);
+  __set_PRIMASK(mask);
+  return result;
+}
+
 static HAL_StatusTypeDef MotorControl_PreparePwmStart(void)
 {
   TIM_TypeDef *tim = motor_timer->Instance;
@@ -234,9 +260,7 @@ static HAL_StatusTypeDef MotorControl_PreparePwmStart(void)
   MODIFY_REG(tim->CCMR1, TIM_CCMR1_OC1M | TIM_CCMR1_OC2M,
              TIM_OCMODE_FORCED_INACTIVE | (TIM_OCMODE_FORCED_INACTIVE << 8U));
   MODIFY_REG(tim->CCMR2, TIM_CCMR2_OC3M, TIM_OCMODE_FORCED_INACTIVE);
-  __HAL_TIM_SET_COUNTER(motor_timer, 0U);
-  tim->EGR = TIM_EGR_UG;
-  __HAL_TIM_CLEAR_FLAG(motor_timer, TIM_FLAG_UPDATE);
+  if (MotorControl_ResetTimerPhase(motor_timer) != HAL_OK) return HAL_ERROR;
   SET_BIT(tim->CCER, MOTOR_CONTROL_OUTPUT_ENABLE_MASK);
   SET_BIT(tim->CR1, TIM_CR1_CEN);
   SET_BIT(tim->BDTR, TIM_BDTR_MOE);
@@ -294,9 +318,11 @@ static HAL_StatusTypeDef MotorControl_StartAtMidpoint(void)
   CLEAR_BIT(tim->CCER, MOTOR_CONTROL_OUTPUT_ENABLE_MASK);
 
   MotorControl_WriteMidpoint();
-  __HAL_TIM_SET_COUNTER(motor_timer, 0U);
-  tim->EGR = TIM_EGR_UG;
-  __HAL_TIM_CLEAR_FLAG(motor_timer, TIM_FLAG_UPDATE);
+  result=MotorControl_ResetTimerPhase(motor_timer);
+  if (result != HAL_OK) {
+    __set_PRIMASK(interrupt_state);
+    return result;
+  }
 
   /* Enable all six pins together, then start the counter and main output. */
   SET_BIT(tim->CCER, MOTOR_CONTROL_OUTPUT_ENABLE_MASK);
@@ -741,9 +767,9 @@ bool MotorControl_ProcessCommand(const char *command)
 
   command = MotorControl_SkipSpaces(command);
 
-  if (MotorCalibration_IsActive() && !MotorControl_IsCommand(command, "stop") &&
+  if ((MotorCalibration_IsActive() || FocVoltage_IsActive()) && !MotorControl_IsCommand(command, "stop") &&
       !MotorControl_IsCommand(command, "status")) {
-    printf("Calibration active; send stop first\r\n"); return true;
+    printf("Calibration/FOC active; send stop first\r\n"); return true;
   }
   if (MotorControl_ParseRunCommand(command))
   {
@@ -753,6 +779,7 @@ bool MotorControl_ProcessCommand(const char *command)
   if (MotorControl_IsCommand(command, "stop"))
   {
     MotorCalibration_TripISR("user stop");
+    FocVoltage_TripISR("user stop");
     MotorControl_Stop();
     printf("PWM stopped\r\n");
     return true;
@@ -804,7 +831,7 @@ bool MotorControl_ProcessCommand(const char *command)
     {
       printf("PWM: %s, mode=%s, selected=%s, offset=%+.2f %%\r\n",
              outputs_enabled ? "running" : "stopped",
-             (motor_mode == MOTOR_CONTROL_MODE_VOLTAGE) ? "calibration" :
+             (motor_mode == MOTOR_CONTROL_MODE_VOLTAGE) ? (FocVoltage_IsActive() ? "foc-voltage" : "calibration") :
              (motor_mode == MOTOR_CONTROL_MODE_MANUAL) ? "manual" : "off",
              MotorControl_PhaseName(selected_phase),
              selected_offset_percent);
@@ -866,6 +893,7 @@ bool MotorControl_ProcessStopCommand(const char *command)
   }
 
   MotorCalibration_TripISR("user stop");
+  FocVoltage_TripISR("user stop");
   MotorControl_Stop();
   printf("PWM stopped\r\n");
   return true;
@@ -912,21 +940,35 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     return;
   }
 
-  /* In center-aligned mode, process only the update event at counter bottom. */
-  if (__HAL_TIM_GET_COUNTER(motor_timer) >
-      (__HAL_TIM_GET_AUTORELOAD(motor_timer) / 2U))
-  {
-    return;
-  }
+  /* RCR=1は底で1周期に1回更新。旧RCR=0の手動PWM/六ステップでは従来の
+   * 半周期割り込みを除外する。電圧モードは開始時にRCR=1を必須にする。 */
+  if (motor_timer->Instance->RCR == 0U &&
+      __HAL_TIM_GET_COUNTER(motor_timer) > (__HAL_TIM_GET_AUTORELOAD(motor_timer)/2U)) return;
 
-  /* PWMの底で角度取得を開始。手動PWM/ADC取得中も同じ周期で観測する。 */
+  uint32_t began = DWT->CYCCNT;
   MotorCalibration_WatchdogISR();
   AS5047P_Tick();
+  FocVoltage_TickISR();
+  /* RCR=1: この底で前回CCRが反映済み。今回計算するCCRは次の底で反映する。
+   * 上り/下りを含む全周期の90%（現設定では約45us）までを許可し、残り5usを
+   * CCR書込み余裕にする。CNT位相にはISR入口の遅れも含まれる。
+   * UIF再成立は計算中に次周期へ到達したことを示すため、CNTが小さくても停止。
+   * 最後の判定と3相書込みを排他し、ADC割り込みによる途中の遅延を防ぐ。 */
+  uint32_t mask=__get_PRIMASK(); __disable_irq();
+  uint32_t arr=__HAL_TIM_GET_AUTORELOAD(motor_timer);
+  uint32_t count=__HAL_TIM_GET_COUNTER(motor_timer);
+  uint32_t phase=(motor_timer->Instance->CR1 & TIM_CR1_DIR) ? 2U*arr-count : count;
+  uint32_t elapsed=DWT->CYCCNT-began;
+  FocVoltage_CheckDeadlineISR(elapsed,
+      phase > (2U*arr-arr/5U) ||
+      __HAL_TIM_GET_FLAG(motor_timer,TIM_FLAG_UPDATE) != RESET ||
+      elapsed >= SystemCoreClock/control_tick_hz);
   if (MotorControl_IsVoltageMode()) {
     __HAL_TIM_SET_COMPARE(motor_timer, TIM_CHANNEL_1, voltage_compare[0]);
     __HAL_TIM_SET_COMPARE(motor_timer, TIM_CHANNEL_2, voltage_compare[1]);
     __HAL_TIM_SET_COMPARE(motor_timer, TIM_CHANNEL_3, voltage_compare[2]);
   }
+  __set_PRIMASK(mask);
   if (MotorControl_IsSixStepMode(motor_mode)) MotorControl_SixStepTick();
 }
 
@@ -936,6 +978,13 @@ bool MotorControl_IsVoltageMode(void) { return motor_mode == MOTOR_CONTROL_MODE_
 HAL_StatusTypeDef MotorControl_StartVoltage(void)
 {
   if (!MotorControl_IsStopped()) return HAL_BUSY;
+  /* CubeMX再生成前のRCR=0で45usの締切を使うと頂点で混在更新になるため拒否。 */
+  if (motor_timer == NULL || motor_timer->Init.RepetitionCounter != 1U ||
+      motor_timer->Instance->RCR != 1U ||
+      (motor_timer->Instance->CR1 & TIM_CR1_CMS) != TIM_COUNTERMODE_CENTERALIGNED1) {
+    printf("Voltage mode blocked: set CubeMX TIM1 Repetition Counter=1, Center Aligned 1\r\n");
+    return HAL_ERROR;
+  }
   HAL_StatusTypeDef result = MotorControl_StartAtMidpoint();
   if (result != HAL_OK) return result;
   uint32_t mask = __get_PRIMASK(); __disable_irq();
@@ -953,7 +1002,7 @@ bool MotorControl_SetVoltage(float angle, float vd, float vq, float vm)
   for (unsigned i=0; i<3; i++) compare[i] = (uint32_t)(duty[i] *
       (float)(__HAL_TIM_GET_AUTORELOAD(motor_timer)+1U) + 0.5f);
   /* mainからCCRを直接更新すると更新イベントが3相の途中に来る可能性がある。
-   * 短い排他区間ではRAMだけを公開し、ISRの底で全preloadへ反映する。 */
+   * RAMへ公開し、底ISRで全preloadを書き込む。RCR=1では次の底で実出力に反映。 */
   uint32_t mask = __get_PRIMASK(); __disable_irq();
   bool enabled = MotorControl_IsVoltageMode();
   if (enabled) for (unsigned i=0; i<3; i++) voltage_compare[i] = compare[i];

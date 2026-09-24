@@ -4,5 +4,6 @@
 /* 位相順UVWの電気角[rad]。Vd/Vqは相電圧ベクトル[V]。 */
 bool VoltageVector_Compute(float angle, float vd, float vq, float vm,
                            float limit, float margin, float duty[3]);
+void VoltageVector_SinCos(float angle, float *s, float *c);
 float VoltageVector_Wrap(float angle);
 #endif

@@ -1,5 +1,7 @@
 #include "as5047p.h"
 #include "main.h"
+#include "irq_trace.h"
+#include "motor_control.h"
 #include "motor_control_config.h"
 #include <ctype.h>
 #include <stdio.h>
@@ -49,6 +51,24 @@ static volatile uint32_t transfer_cycles, max_transfer_cycles, interval_cycles, 
 static volatile uint16_t diagnostic, error_flags;
 static uint32_t fallback_ms, report_ms;
 static bool streaming;
+/* 復旧で消える周辺状態を最初の異常時だけ保存する。ISRでは文字列整形しない。
+ * state: 2=要求フレーム、3=応答フレーム。残数0かつTCありならDMA転送は完了し、
+ * 完了ISRの処理待ちである可能性を切り分けられる。リセットで記録をクリアする。 */
+static const char *volatile first_fault;
+static volatile uint32_t fault_state, fault_cycles, fault_sr, fault_rx_left, fault_tx_left, fault_dma_flags;
+static void RecordFault(const char *reason)
+{
+  uint32_t mask=__get_PRIMASK(); __disable_irq();
+  if (!first_fault) {
+    fault_state=state; fault_cycles=DWT->CYCCNT-start_cycles;
+    fault_sr=encoder_spi->Instance->SR;
+    fault_rx_left=rx_dma->CNDTR; fault_tx_left=tx_dma->CNDTR;
+    fault_dma_flags=encoder_spi->hdmarx->DmaBaseAddress->ISR;
+    first_fault=reason;
+  }
+  __set_PRIMASK(mask);
+}
+
 
 static bool OddParity(uint16_t word)
 {
@@ -83,6 +103,7 @@ static void StartFrame(uint16_t word)
   SET_BIT(encoder_spi->Instance->CR2, SPI_CR2_RXDMAEN | SPI_CR2_ERRIE);
   DelayUs(); /* AS5047PのCS setup。クロック速度・CS待ち時間は従来のまま。 */
   SET_BIT(tx_dma->CCR, DMA_CCR_EN);
+  IrqTrace_Event(TRACE_LAUNCH);
   SET_BIT(encoder_spi->Instance->CR2, SPI_CR2_TXDMAEN);
 }
 /* RXのTCだけで正常完了を通知。1ワードなのでHTとTXのTC割り込みは不要。
@@ -93,10 +114,10 @@ bool AS5047P_DMA_IRQHandler(DMA_HandleTypeDef *dma)
   uint32_t rflags = encoder_spi->hdmarx->DmaBaseAddress->ISR;
   uint32_t tflags = encoder_spi->hdmatx->DmaBaseAddress->ISR;
   if ((rflags & rx_te) || (tflags & tx_te)) {
-    StopDma(); spi_errors++; Fail();
+    RecordFault("DMA transfer error"); StopDma(); spi_errors++; Fail();
   } else if (dma == encoder_spi->hdmarx && (rflags & rx_tc)) {
     StopDma();
-    if (!WaitIdle()) { timeouts++; Fail(); }
+    if (!WaitIdle()) { RecordFault("SPI BSY timeout"); timeouts++; Fail(); }
     else FrameComplete();
   } else {
     dma->DmaBaseAddress->IFCR = dma == encoder_spi->hdmarx ? rx_clear : tx_clear;
@@ -107,7 +128,7 @@ bool AS5047P_SPI_IRQHandler(SPI_HandleTypeDef *spi)
 {
   if (!fast_owned || spi != encoder_spi) return false;
   if (spi->Instance->SR & (SPI_SR_OVR | SPI_SR_MODF | SPI_SR_FRE)) {
-    StopDma(); spi_errors++; Fail();
+    RecordFault("SPI status error"); StopDma(); spi_errors++; Fail();
   }
   return true;
 }
@@ -117,10 +138,11 @@ static void StartRead(void)
   if (state != IDLE) {
     if (state == REQUEST || state == RESPONSE) {
       missed++;
-      if (Expired()) { timeouts++; Fail(); }
+      if (Expired()) { RecordFault("TIM transfer timeout"); timeouts++; Fail(); }
     }
     return;
   }
+  IrqTrace_Event(TRACE_READ);
   state = REQUEST;
   start_cycles = DWT->CYCCNT;
   if (transfers != 0U) {
@@ -161,16 +183,16 @@ static void FrameComplete(void)
   if (transfer_cycles > max_transfer_cycles) max_transfer_cycles = transfer_cycles;
   transfers++;
   if (OddParity(response)) {
-    parity_errors++; latest.valid = false; diagnostic_ok = false;
+    RecordFault("response parity"); parity_errors++; latest.valid = false; diagnostic_ok = false;
   } else if (address == REG_ERROR) {
     error_flags = response & 0x3FFFU; diagnostic_ok = false;
   } else if ((response & 0x4000U) != 0U) {
-    sensor_errors++; latest.valid = false; diagnostic_ok = false; read_error_next = true;
+    RecordFault("sensor error flag"); sensor_errors++; latest.valid = false; diagnostic_ok = false; read_error_next = true;
   } else if (address == REG_DIAG) {
     diagnostic = response & 0x3FFFU; diagnostic_ms = HAL_GetTick();
     /* LFを含めて確認し、MISO固定Lowを正常な角度0と誤認しない。 */
     diagnostic_ok = (diagnostic & 0x0F00U) == 0x0100U;
-    if (!diagnostic_ok) { sensor_errors++; latest.valid = false; }
+    if (!diagnostic_ok) { RecordFault("sensor diagnostic"); sensor_errors++; latest.valid = false; }
   } else {
     uint16_t raw = response & 0x3FFFU;
     uint8_t next = published ^ 1U;
@@ -184,6 +206,7 @@ static void FrameComplete(void)
     sample->valid = diagnostic_ok && state == RESPONSE;
     __DMB();
     published = next;
+    IrqTrace_Event(TRACE_PUBLISH);
   }
   __DMB();
   if (state == RESPONSE) state = IDLE;
@@ -224,6 +247,11 @@ static void PrintStatus(void)
   printf("Encoder errors: spi=%lu, parity=%lu, sensor=%lu, timeout=%lu, busy_ticks=%lu, diag=0x%04X, errfl=0x%04X; displayed electrical angle is uncalibrated\r\n",
          (unsigned long)spi_errors, (unsigned long)parity_errors, (unsigned long)sensor_errors,
          (unsigned long)timeouts, (unsigned long)missed, (unsigned int)diagnostic, (unsigned int)error_flags);
+  printf("Encoder first fault: %s, state=%lu, elapsed=%lu ns, SR=0x%08lX, RXleft=%lu, TXleft=%lu, DMA=0x%08lX\r\n",
+      first_fault ? first_fault : "none", (unsigned long)fault_state,
+      (unsigned long)((float)fault_cycles*(1e9f/(float)SystemCoreClock)),
+      (unsigned long)fault_sr,(unsigned long)fault_rx_left,(unsigned long)fault_tx_left,
+      (unsigned long)fault_dma_flags);
 }
 static bool Equals(const char *text, const char *expected)
 {
@@ -235,6 +263,12 @@ static bool Equals(const char *text, const char *expected)
 bool AS5047P_ProcessCommand(const char *command)
 {
   if (command == NULL) return false;
+  if (Equals(command,"angle trace") || Equals(command,"angle trace dump")) {
+    if (!MotorControl_IsStopped()) { printf("Stop PWM before trace command\r\n"); return true; }
+    if (Equals(command,"angle trace")) { IrqTrace_Arm(); printf("Trace armed for next FOC start\r\n"); }
+    else IrqTrace_Dump();
+    return true;
+  }
   if (Equals(command, "angle") || Equals(command, "angle start")) {
     streaming = true; report_ms = HAL_GetTick() - 100U;
     printf("Angle display started (uncalibrated electrical angle)\r\n");
@@ -250,7 +284,7 @@ void AS5047P_Task(void)
   if (encoder_spi == NULL || state == OFF) return;
   if ((state == REQUEST || state == RESPONSE) && Expired()) {
     uint32_t mask = __get_PRIMASK(); __disable_irq();
-    if ((state == REQUEST || state == RESPONSE) && Expired()) { timeouts++; Fail(); }
+    if ((state == REQUEST || state == RESPONSE) && Expired()) { RecordFault("main transfer timeout"); timeouts++; Fail(); }
     __set_PRIMASK(mask);
   }
   if (state == FAILED) {
