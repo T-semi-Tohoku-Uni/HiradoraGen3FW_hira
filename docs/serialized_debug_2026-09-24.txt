@@ -1,0 +1,43 @@
+foc voltage 0 0.4: FOC voltage set: Vd=0.000 V, Vq=0.400 V
+
+foc start: FOC voltage start: ramp from 0 V, current limit 5.00 A
+
+foc status: FOC: running, target=0/400 mV, applied=0/400 mV, elec=4762 mrad, rpm=39
+FOC current: id=-147 iq=-636 mA (ADC polarity), peak=976 mA; fault=none
+FOC timing: ticks=21450, compute_max=14143 ns, adc_control_max=24056 ns, angle_age_max=234218 ns
+FOC phase: update CNT=3644 DIR=1, ADC CNT=2696 DIR=1 (ARR=3999)
+
+foc status: FOC: running, target=0/400 mV, applied=0/400 mV, elec=2963 mrad, rpm=71
+FOC current: id=-135 iq=-5 mA (ADC polarity), peak=976 mA; fault=none
+FOC timing: ticks=41354, compute_max=14156 ns, adc_control_max=24106 ns, angle_age_max=235012 ns
+FOC phase: update CNT=3660 DIR=1, ADC CNT=2703 DIR=1 (ARR=3999)
+
+stop: PWM stopped
+ADC logging disabled; current monitoring continues (queued data may follow)
+FOC stopped: user stop, peak=1.094 A
+ADC DMA logger stopped: overrun=0
+
+foc voltage 0 -0.4: FOC voltage set: Vd=0.000 V, Vq=-0.400 V
+
+foc start: FOC voltage start: ramp from 0 V, current limit 5.00 A
+
+foc status: FOC: running, target=0/-400 mV, applied=0/-400 mV, elec=3963 mrad, rpm=-72
+FOC current: id=156 iq=-41 mA (ADC polarity), peak=971 mA; fault=none
+FOC timing: ticks=19570, compute_max=14118 ns, adc_control_max=24068 ns, angle_age_max=234925 ns
+FOC phase: update CNT=3657 DIR=1, ADC CNT=2700 DIR=1 (ARR=3999)
+
+foc status: FOC: running, target=0/-400 mV, applied=0/-400 mV, elec=5818 mrad, rpm=-53
+FOC current: id=17 iq=439 mA (ADC polarity), peak=971 mA; fault=none
+FOC timing: ticks=39254, compute_max=14318 ns, adc_control_max=24200 ns, angle_age_max=234925 ns
+FOC phase: update CNT=3657 DIR=1, ADC CNT=2700 DIR=1 (ARR=3999)
+
+stop: PWM stopped
+ADC logging disabled; current monitoring continues (queued data may follow)
+FOC stopped: user stop, peak=0.972 A
+ADC DMA logger stopped: overrun=0
+
+angle status: AS5047P OK raw=5661, mech=124.387 deg, elec_uncal=150.710 deg, seq=66017, age=0 ms
+Encoder DMA: source=main, transfers=67173, transfer=20.34/max 56.48 us, interval=2022.82/max 6744.51 us, launch_max=10.20 us
+Encoder errors: spi=0, parity=0, sensor=0, timeout=0, busy_ticks=50210, diag=0x0173, errfl=0x0000; displayed electrical angle is uncalibrated
+Encoder first fault: none, state=0, elapsed=0 ns, SR=0x00000000, RXleft=0, TXleft=0, DMA=0x00000000
+
