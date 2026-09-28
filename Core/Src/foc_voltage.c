@@ -23,6 +23,24 @@ static volatile float vm_cache, electrical, rpm, measured_d, measured_q, peak;
 static volatile uint32_t heartbeat, current_tick, started_ms, ticks, compute_max, total_max, age_max;
 static volatile uint32_t adc_complete_cycles;
 static volatile bool adc_completed;
+static float observed_electrical;
+/* 同一ADC周期でPark変換と電圧生成が参照する、不変の角度スナップショット。 */
+static AS5047P_Sample cycle_angle;
+static uint32_t observation_adc_sequence, observation_adc_cycles;
+static bool observation_valid;
+bool FocVoltage_GetObservationISR(FocVoltage_Observation *observation)
+{
+  if (!observation_valid || !running || fault) return false;
+  observation->id_a=measured_d;
+  observation->iq_a=measured_q;
+  observation->electrical_rad=observed_electrical;
+  observation->adc_sequence=observation_adc_sequence;
+  observation->angle_sequence=cycle_angle.sequence;
+  observation->adc_callback_cycles=observation_adc_cycles;
+  observation->angle_request_cycles=cycle_angle.request_cycles;
+  observation->angle_received_cycles=cycle_angle.received_cycles;
+  return true;
+}
 static uint32_t last_tick_cycles, angle_sequence, angle_cycles, reverse_since;
 static float previous_angle;
 /* 静止判定はmainで継続観測。停止指令を出しただけでは再始動を許可しない。 */
@@ -111,23 +129,24 @@ void FocVoltage_TickISR(void)
   if ((uint32_t)(now-heartbeat)>MOTOR_CONTROL_FOC_MAIN_TIMEOUT_MS) { FocVoltage_TripISR("main stale"); return; }
   if ((uint32_t)(now-current_tick)>2U) { FocVoltage_TripISR("ADC stale"); return; }
   if (HAL_GPIO_ReadPin(GPIOE,GPIO_PIN_15)==GPIO_PIN_RESET) { FocVoltage_TripISR("gate driver nFAULT"); return; }
-  AS5047P_Sample sample;
-  if (!AS5047P_GetSample(&sample)) { FocVoltage_TripISR("encoder invalid"); return; }
-  uint32_t age=began-sample.request_cycles;
+  /* CurrentISRで取得・検証済み。ここで再取得するとdq電流と出力角がずれる。 */
+  if (!observation_valid) { FocVoltage_TripISR("current observation invalid"); return; }
+  const AS5047P_Sample *sample=&cycle_angle;
+  uint32_t age=began-sample->request_cycles;
   if (age>age_max) age_max=age;
   if (age>(SystemCoreClock/1000000U)*MOTOR_CONTROL_FOC_ANGLE_MAX_AGE_US) {
     FocVoltage_TripISR("encoder age limit"); return;
   }
-  if (sample.sequence!=angle_sequence) {
-    uint32_t elapsed=sample.request_cycles-angle_cycles;
+  if (sample->sequence!=angle_sequence) {
+    uint32_t elapsed=sample->request_cycles-angle_cycles;
     if (elapsed) {
-      float speed=Difference(sample.mechanical_rad,previous_angle)*
+      float speed=Difference(sample->mechanical_rad,previous_angle)*
           (60.0f/TWO_PI)*(float)SystemCoreClock/(float)elapsed;
       /* 14bitの量子化を20kHzで差分すると速度に段差が出るため平滑化する。 */
       rpm+=(speed-rpm)*(1.0f/64.0f);
     }
-    angle_cycles=sample.request_cycles; angle_sequence=sample.sequence;
-    previous_angle=sample.mechanical_rad;
+    angle_cycles=sample->request_cycles; angle_sequence=sample->sequence;
+    previous_angle=sample->mechanical_rad;
   }
   if (fabsf(rpm)>MOTOR_CONTROL_FOC_MAX_RPM) { FocVoltage_TripISR("speed limit"); return; }
   if (rpm*(target_q>0.0f ? 1.0f : -1.0f)<-30.0f) {
@@ -140,8 +159,7 @@ void FocVoltage_TickISR(void)
   float step=MOTOR_CONTROL_FOC_SLEW_VOLTS_PER_SEC*(float)elapsed/(float)SystemCoreClock;
   applied_d=Approach(applied_d,target_d,step);
   applied_q=Approach(applied_q,target_q,step);
-  electrical=VoltageVector_Wrap((float)calibration.direction*MOTOR_CONTROL_POLE_PAIRS*
-                              sample.mechanical_rad-calibration.offset);
+  electrical=observed_electrical;
   /* UVW座標で負の相順ならqも反転し、encoder増加方向のトルクを正にする。
    * 初版は角度外挿なし。前周期の取得角を使用し、古さを監視する。
    * CCRはこのISR後、次の頂点で反映（RCR=1）。センサー内部遅延は別途存在する。 */
@@ -159,9 +177,11 @@ void FocVoltage_CheckDeadlineISR(uint32_t elapsed_cycles,bool late)
   if (elapsed_cycles>total_max) total_max=elapsed_cycles;
   if (late) FocVoltage_TripISR("PWM update deadline");
 }
-void FocVoltage_CurrentISR(const float currents[4],bool rails)
+void FocVoltage_CurrentISR(const float currents[4],bool rails,
+                           uint32_t adc_sequence,uint32_t adc_callback_cycles)
 {
-  if (!active) return;
+  observation_valid=false;
+  if (!active || fault) return;
   current_tick=HAL_GetTick();
   if (rails) { FocVoltage_TripISR("ADC saturated"); return; }
   for (unsigned i=0;i<4;i++) {
@@ -171,6 +191,14 @@ void FocVoltage_CurrentISR(const float currents[4],bool rails)
     }
   }
   adc_seen=true;
+  if (!running) return; /* 起動準備中は電流保護だけ行い、観測値を公開しない。 */
+  if (!AS5047P_GetSample(&cycle_angle)) { FocVoltage_TripISR("encoder invalid"); return; }
+  uint32_t age=DWT->CYCCNT-cycle_angle.request_cycles;
+  if (age>(SystemCoreClock/1000000U)*MOTOR_CONTROL_FOC_ANGLE_MAX_AGE_US) {
+    FocVoltage_TripISR("encoder age limit"); return;
+  }
+  observation_adc_sequence=adc_sequence;
+  observation_adc_cycles=adc_callback_cycles;
   /* dqは観測のみ。電流PIは未実装。3相の共通成分を除いてClarke変換する。
    * Uは2ランクの平均、V/Wも採用。サンプル時刻は完全同時ではない。 */
   float u=(currents[0]+currents[2])*0.5f*MOTOR_CONTROL_FOC_CURRENT_POLARITY;
@@ -178,9 +206,14 @@ void FocVoltage_CurrentISR(const float currents[4],bool rails)
   float w=currents[3]*MOTOR_CONTROL_FOC_CURRENT_POLARITY;
   float a=(2.0f*u-v-w)/3.0f, b=(v-w)/1.732050808f;
   float c,s;
-  VoltageVector_SinCos(electrical,&s,&c);
+  /* 今回のADCに組み合わせる最新角度。前周期のelectricalは再利用しない。
+   * この角度をTickISRにも渡す。センサー遅延を仮定した外挿はまだ行わない。 */
+  observed_electrical=VoltageVector_Wrap((float)calibration.direction*MOTOR_CONTROL_POLE_PAIRS*
+                                       cycle_angle.mechanical_rad-calibration.offset);
+  VoltageVector_SinCos(observed_electrical,&s,&c);
   measured_d=a*c+b*s;
   measured_q=(-a*s+b*c)*(float)calibration.direction;
+  observation_valid=running;
 }
 void FocVoltage_Task(void)
 {
@@ -247,7 +280,7 @@ static void PrintStatus(bool capture)
   if(line==1) printf("FOC: %s, target=%ld/%ld mV, applied=%ld/%ld mV, elec=%ld mrad, rpm=%ld\r\n",
       on ? (run ? "running" : "arming/stopping") : "off",
       (long)(td*1000),(long)(tq*1000),(long)(d*1000),(long)(q*1000),(long)(e*1000),(long)speed);
-  else if(line==2) printf("FOC current: id=%ld iq=%ld mA (ADC polarity), peak=%ld mA; fault=%s\r\n",
+  else if(line==2) printf("FOC current: id=%ld iq=%ld mA (configured polarity), peak=%ld mA; fault=%s\r\n",
       (long)(id*1000),(long)(iq*1000),(long)(p*1000),why ? why : "none");
   else if(line==3) printf("FOC timing: ticks=%lu, compute_max=%lu ns, adc_control_max=%lu ns, angle_age_max=%lu ns\r\n",
       (unsigned long)n,(unsigned long)((float)c*(1e9f/(float)SystemCoreClock)),

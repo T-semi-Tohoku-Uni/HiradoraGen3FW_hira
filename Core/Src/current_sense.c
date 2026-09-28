@@ -425,6 +425,8 @@ bool CurrentSense_IsBusy(void)
 
 void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
+  /* ソフトウェア観測時刻。ADC変換時間・IRQ待ちを含むためS/H時刻とは呼ばない。 */
+  const uint32_t callback_cycles=DWT->CYCCNT;
   uint32_t index;
   uint16_t u1_raw;
   uint16_t v_raw;
@@ -478,8 +480,6 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
     offset_sums[1] += v_raw;
     offset_sums[2] += u2_raw;
     offset_sums[3] += w_raw;
-  } else if (log_requested) {
-    DmaLogger_Push(index, u1_raw, v_raw, u2_raw, w_raw, MotorControl_GetSector());
   }
   if (control_acquisition) {
     const uint16_t raw[4] = {u1_raw, v_raw, u2_raw, w_raw};
@@ -490,7 +490,11 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
       if (raw[i] < 16U || raw[i] > 4079U) rails = true;
     }
     MotorCalibration_CurrentISR(currents, rails);
-    FocVoltage_CurrentISR(currents, rails);
+    FocVoltage_CurrentISR(currents, rails, index, callback_cycles);
+  }
+  /* 同じADC値のdq観測完成後、角度更新前に組で保存する。 */
+  if (acquisition_sample_count == 0U && log_requested) {
+    DmaLogger_Push(index, u1_raw, v_raw, u2_raw, w_raw, MotorControl_GetSector());
   }
   /* 電流取得/保護後にFOC→CCR→次回角度DMAを直列に実行する。 */
   MotorControl_FocAdcISR();

@@ -16,9 +16,9 @@
 /* 定格不明のため、以下は実験用保護値。KVから許容電流は推定しない。
  * CURRENT_LIMIT_AはFOC通常運転用。校正にはCAL_CURRENT_LIMIT_Aを使う。
  * いずれも電流指令値ではなく、超過時に出力を停止する閾値。 */
-#define MOTOR_CONTROL_CURRENT_LIMIT_A              5.0f
+#define MOTOR_CONTROL_CURRENT_LIMIT_A              10.0f
 #define MOTOR_CONTROL_CAL_CURRENT_LIMIT_A          10.0f
-/* N5065実測：1V/10Aで7回完走、最大約8.41A。通常運転用5Aとは独立。 */
+/* N5065実測：1V/10Aで7回完走、最大約8.41A。通常運転用閾値とは独立。 */
 #define MOTOR_CONTROL_CAL_VOLTAGE                   1.0f
 #define MOTOR_CONTROL_VM_MIN_VOLTS                 6.0f
 #define MOTOR_CONTROL_VOLTAGE_LIMIT                 3.0f
@@ -30,16 +30,18 @@
 #define MOTOR_CONTROL_CAL_POSITION_TOLERANCE_RAD    0.15f
 #define MOTOR_CONTROL_CAL_WATCHDOG_MS               20U
 
-/* dq電圧一定FOCの初期実験用。校正の10Aとは別に通常運転は5Aで保護。 */
-#define MOTOR_CONTROL_FOC_MAX_VOLTS                 0.5f
-#define MOTOR_CONTROL_FOC_SLEW_VOLTS_PER_SEC        0.5f
+/* dq電圧一定FOCの実験用。通常運転の保護にはCURRENT_LIMIT_Aを使う。 */
+#define MOTOR_CONTROL_FOC_MAX_VOLTS                 1.0f
+#define MOTOR_CONTROL_FOC_SLEW_VOLTS_PER_SEC        1.0f
 #define MOTOR_CONTROL_FOC_MAX_RPM                   600.0f
 #define MOTOR_CONTROL_FOC_ANGLE_MAX_AGE_US          250U
 #define MOTOR_CONTROL_FOC_MAIN_TIMEOUT_MS          20U
 #define MOTOR_CONTROL_FOC_STANDSTILL_MS            300U
 #define MOTOR_CONTROL_FOC_STANDSTILL_RAD           0.02f
-/* ADCの符号は既存ログと同じ。dq表示は相電流極性を実機照合するまで参考値。 */
-#define MOTOR_CONTROL_FOC_CURRENT_POLARITY          1.0f
+/* 2026-09-25: ±Vq/±Vd試験でADC電流は印加電圧と逆符号だったため、
+ * dq観測だけを反転する。raw相電流ログ・絶対値の過電流保護は変更しない。
+ * 電流の絶対精度、サンプル時刻の影響は別途検証が必要。 */
+#define MOTOR_CONTROL_FOC_CURRENT_POLARITY         -1.0f
 
 /* Charge all three bootstrap capacitors before each PWM start. */
 #define MOTOR_CONTROL_BOOTSTRAP_CHARGE_US           750U

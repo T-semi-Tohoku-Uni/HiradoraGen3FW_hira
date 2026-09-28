@@ -7,6 +7,8 @@
 typedef struct {
   uint16_t raw;
   float mechanical_rad, electrical_rad;
+  /* request: 要求転送の開始処理、received: 応答のソフトウェア解析開始。
+   * センサー内部の測定時刻やSPI最終エッジのハード時刻ではない。 */
   uint32_t request_cycles, received_cycles, updated_ms, sequence;
   bool valid;
 } AS5047P_Sample;
