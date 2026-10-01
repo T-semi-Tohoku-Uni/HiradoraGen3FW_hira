@@ -30,6 +30,13 @@
 #define MOTOR_CONTROL_CAL_POSITION_TOLERANCE_RAD    0.15f
 #define MOTOR_CONTROL_CAL_WATCHDOG_MS               20U
 
+/* 機械1回転の診断専用。既存校正値は変更せず、低電圧で長時間走査する。 */
+#define MOTOR_CONTROL_CAL_MAP_VOLTAGE               0.4f
+#define MOTOR_CONTROL_CAL_MAP_CURRENT_LIMIT_A       5.0f
+#define MOTOR_CONTROL_CAL_MAP_POINTS                1000U
+#define MOTOR_CONTROL_CAL_MAP_SWEEP_MS              (MOTOR_CONTROL_CAL_SWEEP_MS * MOTOR_CONTROL_POLE_PAIRS)
+#define MOTOR_CONTROL_CAL_MAP_TRAVEL_TOLERANCE      0.05f
+
 /* dq電圧一定FOCの実験用。通常運転の保護にはCURRENT_LIMIT_Aを使う。 */
 #define MOTOR_CONTROL_FOC_MAX_VOLTS                 1.0f
 #define MOTOR_CONTROL_FOC_SLEW_VOLTS_PER_SEC        1.0f

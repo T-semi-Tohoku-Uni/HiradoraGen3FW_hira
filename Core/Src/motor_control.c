@@ -785,7 +785,7 @@ bool MotorControl_ProcessCommand(const char *command)
 
   if (MotorControl_IsCommand(command, "stop"))
   {
-    MotorCalibration_TripISR("user stop");
+    MotorCalibration_Stop();
     FocVoltage_TripISR("user stop");
     MotorControl_Stop();
     printf("PWM stopped\r\n");
@@ -899,7 +899,7 @@ bool MotorControl_ProcessStopCommand(const char *command)
     return false;
   }
 
-  MotorCalibration_TripISR("user stop");
+  MotorCalibration_Stop();
   FocVoltage_TripISR("user stop");
   MotorControl_Stop();
   printf("PWM stopped\r\n");

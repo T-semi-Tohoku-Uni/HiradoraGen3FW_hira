@@ -184,12 +184,82 @@ Vd/Vqシリアル運転は下記のFOCコマンドで行います。
 | コマンド | 動作 |
 |---|---|
 | `cal start` | 停止中のみ、相順と電気角offsetを手動校正 |
+| `cal map` | 校正済み・停止中のみ、機械1回転の往復角度誤差をCSV出力。校正値は変更しない |
 | `cal status` | 校正有効性、段階、保存状態、相順、offset、停止理由 |
 | `cal stop` / `stop` | 校正を中止し全PWM出力を停止 |
 | `cal save` | 成功したRAM校正値をFlashへ保存・読み戻し検証（PWM/ADC停止中のみ） |
-| `cal test` | 停止中に電圧変換・往復判定・保存データ検査の586項目を実行。通電・Flash書き込みなし |
+| `cal test` | 停止中に既存586項目＋map演算9項目（計595項目）を実行。通電・Flash書き込みなし |
 
-手順：
+### `cal map`: 機械1回転の誤差測定（診断専用）
+
+有効な校正値（RAMまたは起動時に読み込んだFlash値）が必要です。
+未校正なら先に`cal start`を実行してください。PWM停止・ADCログidle・有効で新鮮な
+エンコーダー値と範囲内のVMを確認して開始します。ローターは両方向に自由に1回転できる
+状態にしてください。directionに従って機械360°を往復するため、電気角正方向が
+エンコーダー角の正方向と一致するとは限りません。
+
+```text
+stop
+adc stop
+cal status
+cal map
+```
+
+ADCログの終了を待ってから`cal map`を送ります。map専用設定は長時間通電を考慮した
+Vd=0.4 V、Vq=0 V、相過電流停止5 Aです。現在角度に対応した電気角で500 ms rampし、
+各方向28秒で走査します（4000 ms × 7極対）。静止確認と保持を含む全体は約59秒です。
+通常の`cal start`は従来どおり1 V / 10 Aです。
+
+状態遷移は`MAP_CHECK_STILL → MAP_RAMP → MAP_HOLD_START → MAP_FORWARD →
+MAP_HOLD_END → MAP_BACKWARD → MAP_HOLD_RETURN → PWM OFF`です。
+保持の最後200 msで20サンプル以上、角度幅0.15 electrical rad以下を確認します。
+往路の機械移動量は符号も含め`direction × 2π`に対し5%以内、戻りは開始位置から
+電気角換算0.15 rad以内であることを検証します。戻り量はwrapせず脱調を検出します。
+
+`CALMAP_BEGIN`、`CALMAP_HEADER`に続き、`CALMAP,F,0,...`～`CALMAP,F,999,...`、
+`CALMAP,R,0,...`～`CALMAP,R,999,...`をUARTへ出力します。
+点はprogressに対し均等に配置し、新しいエンコーダー更新につき最大1点取得します。
+Task実行の粒度による小さな時刻ずれはあります。測定点を飛ばした場合は補間・穴埋めせず停止します。
+
+```text
+CALMAP_HEADER,pass,index,elapsed_ms,cmd_delta_e_rad,cmd_elec_rad,mech_raw_rad,mech_unwrapped_rad,error_e_rad,U1_A,V_A,U2_A,W_A
+```
+
+`elapsed_ms`は各方向の走査開始からの測定時刻、角度はすべてrad、電流はAです。
+指令角は直前のTaskで設定した電圧指令を記録します。電流は短い割り込み禁止区間で
+取得した最新4相スナップショットであり、エンコーダーと完全同時刻の測定ではありません。
+
+```text
+measured_elec = wrap_0_2pi(direction × pole_pairs × mech_raw - old_offset)
+error_e = wrap_signed_pi(measured_elec - cmd_elec)
+mean_error = atan2(sum(sin(error_e)), sum(cos(error_e)))
+candidate_offset = wrap_0_2pi(old_offset + mean_error_combined)
+bidirectional_difference = wrap_signed_pi(mean_error_forward - mean_error_reverse)
+resultant = hypot(sum(sin(error_e)), sum(cos(error_e))) / count
+```
+
+`error_e`は**electrical radians**です。センサー位置依存誤差だけでなく、offset残差、
+磁界への追従遅れ、摩擦・コギングを含みます。正逆別と全2000点の円周平均を出力し、
+正逆差とresultantから方向依存性・ばらつきを確認できます。resultantは1に近いほど集中しています。
+正常終了時のみ`CALMAP_SUMMARY`～`CALMAP_END`を出力します。
+
+`candidate_offset`は表示だけです。成功・失敗・中止のいずれでも既存record、VALID、
+保存状態、Flashを変更しません。map後の`cal save`も従来の校正値を保存します。
+補正LUT・FOC中の補正・OTP書込みは実装していません。
+
+`stop` / `cal stop`で即時にPWM停止・ADC制御終了できます。動作中も過電流、ADC飽和・
+更新停止、VM上下限・有効性、encoder有効性・鮮度、nFAULT、main watchdogを監視します。
+異常時はPWM停止を優先し、main側で`CALMAP_STOP`の理由・stage・経過時間とpeak電流、
+過電流時にはtrip電流を出力します。`cal status`にはmap段階と取得点数が追加されます。
+
+約120～140 bytes/点、約35.7点/秒なので、測定CSVは約4.3～5.0 kB/s
+（8N1で約43～50 kbit/s、921600 bpsの約5%）です。他のログやコマンド出力は別枠です。
+1000点配列は確保せず、2方向のsin/cos積算とカウンターだけを保持します。
+
+実装・ビルド・エミュレーション確認と実機確認手順は
+[cal map検証記録](cal_map_validation.md)を参照してください。
+
+### 通常校正 `cal start` の手順
 
 1. `stop`、`adc stop`を送り、ADC停止完了を待つ。
 2. ローターが自由に動ける状態で`cal start`。通常約16秒で予備整列と往復校正を行う。
