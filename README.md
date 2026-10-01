@@ -19,7 +19,7 @@ FOCの基盤として、dq電圧からのPWM生成・手動エンコーダー校
 設定値と校正の操作手順は[シリアルコマンド一覧](docs/serial_commands.md)を参照してください。
 dq電圧一定FOCを追加しました。`foc voltage 0 0.05`で指令を設定し、
 静止・校正済みを確認して`foc start`で開始します。`foc status`で電流と処理時間を表示します。
-`stop`で全出力OFF。`adc stop`後も電流監視は継続します。電流PI制御は未実装です。
+`stop`で全出力OFF。`adc stop`後も電流監視は継続します。電流PIも使用できます。操作と暫定ゲインは[電流PI](docs/current_pi.md)を参照してください。
 FOC追加版はRelease/Debugビルド確認済み。Releaseで±0.4 Vの正逆回転、停止、100 HzのADCログを確認しました。
 [実機確認結果と残課題](docs/foc_voltage_test_2026-09-24.md)を参照してください。
 

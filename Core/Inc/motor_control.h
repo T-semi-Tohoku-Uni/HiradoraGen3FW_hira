@@ -68,6 +68,8 @@ void MotorControl_FocAdcBeginISR(void);
 void MotorControl_PrintFocPhase(void);
 bool MotorControl_IsStopped(void);
 bool MotorControl_IsVoltageMode(void);
+/* Fixed ADC/PWM control period derived from the initialized TIM1 clock. */
+float MotorControl_GetPeriodSeconds(void);
 HAL_StatusTypeDef MotorControl_StartVoltage(void);
 bool MotorControl_SetVoltage(float angle, float vd, float vq, float vm);
 

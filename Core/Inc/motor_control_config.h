@@ -16,12 +16,12 @@
 /* 定格不明のため、以下は実験用保護値。KVから許容電流は推定しない。
  * CURRENT_LIMIT_AはFOC通常運転用。校正にはCAL_CURRENT_LIMIT_Aを使う。
  * いずれも電流指令値ではなく、超過時に出力を停止する閾値。 */
-#define MOTOR_CONTROL_CURRENT_LIMIT_A              10.0f
+#define MOTOR_CONTROL_CURRENT_LIMIT_A              20.0f
 #define MOTOR_CONTROL_CAL_CURRENT_LIMIT_A          10.0f
 /* N5065実測：1V/10Aで7回完走、最大約8.41A。通常運転用閾値とは独立。 */
 #define MOTOR_CONTROL_CAL_VOLTAGE                   1.0f
 #define MOTOR_CONTROL_VM_MIN_VOLTS                 6.0f
-#define MOTOR_CONTROL_VOLTAGE_LIMIT                 3.0f
+#define MOTOR_CONTROL_VOLTAGE_LIMIT                 8.0f
 #define MOTOR_CONTROL_PWM_MARGIN                   0.05f
 #define MOTOR_CONTROL_CAL_RAMP_MS                  500U
 #define MOTOR_CONTROL_CAL_HOLD_MS                  700U
@@ -49,6 +49,19 @@
  * dq観測だけを反転する。raw相電流ログ・絶対値の過電流保護は変更しない。
  * 電流の絶対精度、サンプル時刻の影響は別途検証が必要。 */
 #define MOTOR_CONTROL_FOC_CURRENT_POLARITY         -1.0f
+
+/* 電流PIの暫定値。Kp [V/A], Ki [V/(A*s)]。実機で調整すること。
+ * 指令上限は相電流の過電流停止閾値とは別。積分項の単位はV。
+ * CURRENT_REF_MAX_A < CURRENT_LIMIT_A が必須（同値は設定エラー）。 */
+#define MOTOR_CONTROL_CURRENT_KP_D                  0.1f
+#define MOTOR_CONTROL_CURRENT_KI_D                  1.0f
+#define MOTOR_CONTROL_CURRENT_KP_Q                  0.1f
+#define MOTOR_CONTROL_CURRENT_KI_Q                  1.0f
+#define MOTOR_CONTROL_CURRENT_INTEGRAL_LIMIT_D      15.0f
+#define MOTOR_CONTROL_CURRENT_INTEGRAL_LIMIT_Q      15.0f
+#define MOTOR_CONTROL_CURRENT_REF_MAX_A             10.0f
+#define MOTOR_CONTROL_CURRENT_SLEW_A_PER_SEC         15.0f
+#define MOTOR_CONTROL_CURRENT_MAX_VOLTS             2.0f
 
 /* Charge all three bootstrap capacitors before each PWM start. */
 #define MOTOR_CONTROL_BOOTSTRAP_CHARGE_US           750U
