@@ -48,8 +48,8 @@ def test(path):
                 assert f.get('observation_valid', '<?')
                 assert bytes(f.uc.mem_read(f.foc['cycle_angle'], 32)) == sensor
                 base = (direction * 7 * theta - offset) % (2 * math.pi)
-                delta = (-gain * direction * 7 * math.radians(0.62) *
-                         math.sin(2 * theta + math.radians(133))) if enabled else 0
+                # Specified electrical error is independent of calibration direction.
+                delta = -gain * 0.0750 * math.cos(2 * theta - 2.327) if enabled else 0
                 actual_delta = f.get('observed_correction', '<f')
                 actual = f.get('observed_electrical', '<f')
                 expected = (base + delta) % (2 * math.pi)

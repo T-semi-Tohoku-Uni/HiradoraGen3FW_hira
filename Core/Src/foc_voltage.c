@@ -108,9 +108,9 @@ static bool ConfigValid(void)
     MOTOR_CONTROL_FOC_STANDSTILL_MS>0U && isfinite(MOTOR_CONTROL_FOC_STANDSTILL_RAD) &&
     MOTOR_CONTROL_FOC_STANDSTILL_RAD>0.0f &&
     fabsf(MOTOR_CONTROL_FOC_CURRENT_POLARITY)==1.0f &&
-    isfinite(MOTOR_CONTROL_ENCODER_H2_AMPLITUDE_DEG) &&
-    MOTOR_CONTROL_ENCODER_H2_AMPLITUDE_DEG>=0.0f &&
-    isfinite(MOTOR_CONTROL_ENCODER_H2_PHASE_DEG);
+    isfinite(MOTOR_CONTROL_ENCODER_H2_AMPLITUDE_ELEC_RAD) &&
+    MOTOR_CONTROL_ENCODER_H2_AMPLITUDE_ELEC_RAD>=0.0f &&
+    isfinite(MOTOR_CONTROL_ENCODER_H2_PHASE_RAD);
 }
 static float Approach(float value,float goal,float step)
 {
@@ -277,13 +277,13 @@ void FocVoltage_CurrentISR(const float currents[4],bool rails,
                                        cycle_angle.mechanical_rad-calibration.offset);
   observed_correction=0.0f;
   if (h2_enabled && h2_gain!=0) {
-    float error_sin, unused_cos;
+    float unused_sin, error_cos;
     VoltageVector_SinCos(2.0f*cycle_angle.mechanical_rad+
-                        MOTOR_CONTROL_ENCODER_H2_PHASE_DEG*(PI/180.0f),
-                        &error_sin,&unused_cos);
-    observed_correction=-(float)h2_gain*(float)calibration.direction*
-        MOTOR_CONTROL_POLE_PAIRS*MOTOR_CONTROL_ENCODER_H2_AMPLITUDE_DEG*
-        (PI/180.0f)*error_sin;
+                        MOTOR_CONTROL_ENCODER_H2_PHASE_RAD,
+                        &unused_sin,&error_cos);
+    /* Error is specified directly in electrical radians in the FOC frame. */
+    observed_correction=-(float)h2_gain*
+        MOTOR_CONTROL_ENCODER_H2_AMPLITUDE_ELEC_RAD*error_cos;
   }
   /* Preserve the original path exactly when disabled or gain is zero.
    * Park and inverse Park share this one corrected snapshot. */
@@ -405,10 +405,10 @@ bool FocVoltage_ProcessCommand(const char *command)
     else {
       printf("Usage: foc h2 on|off|gain <0|+1|-1>|status\r\n"); return true;
     }
-    printf("FOC h2: %s, gain=%d, amplitude=%ld mdeg mechanical, phase=%ld mdeg\r\n",
+    printf("FOC h2: %s, gain=%d, cos amplitude=%ld mrad electrical, phase=%ld mrad\r\n",
         h2_enabled ? "on" : "off",h2_gain,
-        (long)(MOTOR_CONTROL_ENCODER_H2_AMPLITUDE_DEG*1000.0f),
-        (long)(MOTOR_CONTROL_ENCODER_H2_PHASE_DEG*1000.0f));
+        (long)(MOTOR_CONTROL_ENCODER_H2_AMPLITUDE_ELEC_RAD*1000.0f),
+        (long)(MOTOR_CONTROL_ENCODER_H2_PHASE_RAD*1000.0f));
   }
   else if (Same(arg,"stop")) FocVoltage_TripISR("user stop");
   else if (Same(arg,"start")) {

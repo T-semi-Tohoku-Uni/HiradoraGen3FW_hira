@@ -4,7 +4,7 @@
 
 `foc h2 on` / `foc h2 off`、`foc h2 gain 0` / `+1` / `-1`、`foc h2 status`で操作します。
 起動時OFF、gain=+1。運転・ADCログ中も変更可能です。
-0.62° mechanical、`sin(2*theta_m + 133°)`の誤差をgain=+1で減算します。
+電気角誤差`0.0750*cos(2*theta_m - 2.327)` [rad_elec]をgain=+1で減算します。
 raw角度を保持し、FOC使用角だけに適用します。[式・ログ・試験手順](encoder_h2.md)を参照してください。
 
 ## 母線電圧VM

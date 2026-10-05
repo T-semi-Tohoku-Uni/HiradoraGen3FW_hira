@@ -9,16 +9,21 @@ CubeMX設定・センサー取得・校正値・速度推定には変更を加�
 `theta_m`はセンサーゼロ基準のraw機械角[rad]です。
 
 ```text
-error_m = (0.62 * pi/180) * sin(2*theta_m + 133*pi/180)
+error_e = 0.0750 * cos(2*theta_m - 2.327)  [rad_elec]
 base_e  = wrap(direction * pole_pairs * theta_m - offset)
-delta_e = -gain * direction * pole_pairs * error_m  （OFF時は0）
+delta_e = -gain * error_e  （OFF時は0）
 foc_e   = wrap(base_e + delta_e)
 ```
 
-gain=+1は推定誤差を引く向き、-1は逆向きです。位相133°は正弦波への加算位相で、機械角の原点移動ではありません。
-元のフィットがcos基準・別の角度原点の場合は位相を合わせる必要があります。
-振幅・位相は`motor_control_config.h`の`MOTOR_CONTROL_ENCODER_H2_*_DEG`で変更できます。
-7極対では電気角補正の振幅は4.34°（約0.07575 rad）。LUTや12/14次成分は追加していません。
+gain=+1は指定の電気角誤差を引く向き、-1は逆向きです。位相はcosの引数に加える−2.327 radです。
+指定式の`theta_e,raw`は上記`base_e`（方向・offset校正済み、2/rev補正前）に対応します。
+誤差はFOC座標の電気角として指定されているため、極対数7や校正directionを再度掛けません。
+振幅・位相は`motor_control_config.h`の`MOTOR_CONTROL_ENCODER_H2_AMPLITUDE_ELEC_RAD`と`MOTOR_CONTROL_ENCODER_H2_PHASE_RAD`で変更できます。
+電気角振幅0.0750 radは約4.297°、7極対で機械角約0.614°相当です。LUTや12/14次成分は追加していません。
+
+旧版は`sin(2*theta_m + 133°)`を使用していました。新版の誤差は`sin(2*theta_m - 43.325°)`と等価です。
+校正direction=+1の場合、新版gain=+1の加算補正は`+0.0750*sin(2*theta_m + 136.675°)`となり、旧版gain=-1に近い波形です。
+位相差は約3.675°（2次成分の引数）、振幅差は約1%あります。旧版のgain比較結果を新版へそのまま移さず、gain=+1から再比較してください。
 
 ## コマンド
 
