@@ -1,7 +1,9 @@
 # 電流PI
 
-既存の定電圧FOCに、ADC同期のd/q電流PIを追加しました。ゲインは暫定値です。
-実機でのゲイン調整・電流追従・ISR時間余裕は未確認です。
+既存の定電圧FOCに、ADC同期のd/q電流PIを追加しました。
+2026-10-05に現在の負荷で正方向3～14 Aの調整を行い、追加比較で設定を更新しました。
+[追加比較の結果と適用範囲](current_pi_sweep_2026-10-05.md)を参照してください。
+続いて[10 A・14 A各約30秒の連続運転](current_pi_endurance_2026-10-05.md)を確認しました。
 
 ```text
 foc current 0 0.2
@@ -27,14 +29,14 @@ d軸だけの指令も使用できます。停止後は指令と積分項をゼ�
 
 `Core/Inc/motor_control_config.h`で変更し、再ビルドしてください。
 
-| 定義（先頭の`MOTOR_CONTROL_`は省略） | 暫定値 | 意味 |
+| 定義（先頭の`MOTOR_CONTROL_`は省略） | 現在値 | 意味 |
 |---|---:|---|
-| `CURRENT_KP_D` / `CURRENT_KP_Q` | 0.1 | 比例ゲイン V/A |
-| `CURRENT_KI_D` / `CURRENT_KI_Q` | 1.0 | 積分ゲイン V/(A・s)、更新時にTsを乗算 |
-| `CURRENT_INTEGRAL_LIMIT_D` / `CURRENT_INTEGRAL_LIMIT_Q` | 1.0 | 各積分項の絶対上限 V |
-| `CURRENT_REF_MAX_A` | 1.0 | sqrt(Id_ref²+Iq_ref²)の上限 A |
-| `CURRENT_SLEW_A_PER_SEC` | 1.0 | 電流指令ベクトルの移動速度 A/s |
-| `CURRENT_MAX_VOLTS` | 1.0 | dq出力電圧ベクトルの上限 V |
+| `CURRENT_KP_D` / `CURRENT_KP_Q` | 0.6 | 比例ゲイン V/A |
+| `CURRENT_KI_D` / `CURRENT_KI_Q` | 120.0 | 積分ゲイン V/(A・s)、更新時にTsを乗算 |
+| `CURRENT_INTEGRAL_LIMIT_D` / `CURRENT_INTEGRAL_LIMIT_Q` | 15.0 | 各積分項の絶対上限 V |
+| `CURRENT_REF_MAX_A` | 15.0 | sqrt(Id_ref²+Iq_ref²)の上限 A |
+| `CURRENT_SLEW_A_PER_SEC` | 60.0 | 電流指令ベクトルの移動速度 A/s |
+| `CURRENT_MAX_VOLTS` | 5.0 | dq出力電圧ベクトルの上限 V |
 
 相電流の過電流停止閾値`CURRENT_LIMIT_A`は別です。
 電流指令上限はこの閾値未満とします。Ki=0で積分を無効にできます。

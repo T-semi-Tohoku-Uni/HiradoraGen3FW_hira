@@ -56,17 +56,18 @@
  * 電流の絶対精度、サンプル時刻の影響は別途検証が必要。 */
 #define MOTOR_CONTROL_FOC_CURRENT_POLARITY         -1.0f
 
-/* 電流PIの暫定値。Kp [V/A], Ki [V/(A*s)]。実機で調整すること。
+/* 電流PI。2026-10-05: 現在の負荷で正方向3～14Aの短時間試験で調整。
+ * Kp [V/A], Ki [V/(A*s)]。追加比較: docs/current_pi_sweep_2026-10-05.md。
  * 指令上限は相電流の過電流停止閾値とは別。積分項の単位はV。
  * CURRENT_REF_MAX_A < CURRENT_LIMIT_A が必須（同値は設定エラー）。 */
-#define MOTOR_CONTROL_CURRENT_KP_D                  0.1f
-#define MOTOR_CONTROL_CURRENT_KI_D                  1.0f
-#define MOTOR_CONTROL_CURRENT_KP_Q                  0.1f
-#define MOTOR_CONTROL_CURRENT_KI_Q                  1.0f
+#define MOTOR_CONTROL_CURRENT_KP_D                  0.6f
+#define MOTOR_CONTROL_CURRENT_KI_D                  120.0f
+#define MOTOR_CONTROL_CURRENT_KP_Q                  0.6f
+#define MOTOR_CONTROL_CURRENT_KI_Q                  120.0f
 #define MOTOR_CONTROL_CURRENT_INTEGRAL_LIMIT_D      15.0f
 #define MOTOR_CONTROL_CURRENT_INTEGRAL_LIMIT_Q      15.0f
 #define MOTOR_CONTROL_CURRENT_REF_MAX_A             15.0f
-#define MOTOR_CONTROL_CURRENT_SLEW_A_PER_SEC         15.0f
+#define MOTOR_CONTROL_CURRENT_SLEW_A_PER_SEC         60.0f
 #define MOTOR_CONTROL_CURRENT_MAX_VOLTS             5.0f
 
 /* Charge all three bootstrap capacitors before each PWM start. */
