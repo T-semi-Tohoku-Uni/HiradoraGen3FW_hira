@@ -40,6 +40,9 @@ static volatile uint32_t heartbeat, current_tick, started_ms, ticks, compute_max
 static volatile uint32_t adc_complete_cycles;
 static volatile bool adc_completed;
 static float observed_electrical;
+static float observed_base_electrical, observed_correction;
+static volatile bool h2_enabled; /* Boot OFF; no Flash persistence. */
+static volatile int h2_gain = 1;
 /* 同一ADC周期でPark変換と電圧生成が参照する、不変の角度スナップショット。 */
 static AS5047P_Sample cycle_angle;
 static uint32_t observation_adc_sequence, observation_adc_cycles;
@@ -50,6 +53,10 @@ bool FocVoltage_GetObservationISR(FocVoltage_Observation *observation)
   observation->id_a=measured_d;
   observation->iq_a=measured_q;
   observation->electrical_rad=observed_electrical;
+  observation->mechanical_raw_rad=cycle_angle.mechanical_rad;
+  observation->electrical_raw_rad=cycle_angle.electrical_rad;
+  observation->electrical_base_rad=observed_base_electrical;
+  observation->electrical_correction_rad=observed_correction;
   observation->adc_sequence=observation_adc_sequence;
   observation->angle_sequence=cycle_angle.sequence;
   observation->adc_callback_cycles=observation_adc_cycles;
@@ -100,7 +107,10 @@ static bool ConfigValid(void)
     MOTOR_CONTROL_FOC_ANGLE_MAX_AGE_US>0U && MOTOR_CONTROL_FOC_MAIN_TIMEOUT_MS>0U &&
     MOTOR_CONTROL_FOC_STANDSTILL_MS>0U && isfinite(MOTOR_CONTROL_FOC_STANDSTILL_RAD) &&
     MOTOR_CONTROL_FOC_STANDSTILL_RAD>0.0f &&
-    fabsf(MOTOR_CONTROL_FOC_CURRENT_POLARITY)==1.0f;
+    fabsf(MOTOR_CONTROL_FOC_CURRENT_POLARITY)==1.0f &&
+    isfinite(MOTOR_CONTROL_ENCODER_H2_AMPLITUDE_DEG) &&
+    MOTOR_CONTROL_ENCODER_H2_AMPLITUDE_DEG>=0.0f &&
+    isfinite(MOTOR_CONTROL_ENCODER_H2_PHASE_DEG);
 }
 static float Approach(float value,float goal,float step)
 {
@@ -263,8 +273,22 @@ void FocVoltage_CurrentISR(const float currents[4],bool rails,
   float c,s;
   /* 今回のADCに組み合わせる最新角度。前周期のelectricalは再利用しない。
    * この角度をTickISRにも渡す。センサー遅延を仮定した外挿はまだ行わない。 */
-  observed_electrical=VoltageVector_Wrap((float)calibration.direction*MOTOR_CONTROL_POLE_PAIRS*
+  observed_base_electrical=VoltageVector_Wrap((float)calibration.direction*MOTOR_CONTROL_POLE_PAIRS*
                                        cycle_angle.mechanical_rad-calibration.offset);
+  observed_correction=0.0f;
+  if (h2_enabled && h2_gain!=0) {
+    float error_sin, unused_cos;
+    VoltageVector_SinCos(2.0f*cycle_angle.mechanical_rad+
+                        MOTOR_CONTROL_ENCODER_H2_PHASE_DEG*(PI/180.0f),
+                        &error_sin,&unused_cos);
+    observed_correction=-(float)h2_gain*(float)calibration.direction*
+        MOTOR_CONTROL_POLE_PAIRS*MOTOR_CONTROL_ENCODER_H2_AMPLITUDE_DEG*
+        (PI/180.0f)*error_sin;
+  }
+  /* Preserve the original path exactly when disabled or gain is zero.
+   * Park and inverse Park share this one corrected snapshot. */
+  observed_electrical=observed_correction==0.0f ? observed_base_electrical :
+      VoltageVector_Wrap(observed_base_electrical+observed_correction);
   VoltageVector_SinCos(observed_electrical,&s,&c);
   measured_d=a*c+b*s;
   measured_q=(-a*s+b*c)*(float)calibration.direction;
@@ -368,6 +392,24 @@ bool FocVoltage_ProcessCommand(const char *command)
       (command[3] && !isspace((unsigned char)command[3]))) return false;
   const char *arg=command+3; while (isspace((unsigned char)*arg)) arg++;
   if (!*arg || Same(arg,"status")) PrintStatus(true);
+  else if (strlen(arg)>=2 && !strncmp(arg,"h2",2) &&
+           (!arg[2] || isspace((unsigned char)arg[2]))) {
+    const char *setting=arg+2;
+    while (isspace((unsigned char)*setting)) setting++;
+    if (!*setting || Same(setting,"status")) { /* Read-only query. */ }
+    else if (Same(setting,"on")) h2_enabled=true;
+    else if (Same(setting,"off")) h2_enabled=false;
+    else if (Same(setting,"gain 0")) h2_gain=0;
+    else if (Same(setting,"gain +1") || Same(setting,"gain 1")) h2_gain=1;
+    else if (Same(setting,"gain -1")) h2_gain=-1;
+    else {
+      printf("Usage: foc h2 on|off|gain <0|+1|-1>|status\r\n"); return true;
+    }
+    printf("FOC h2: %s, gain=%d, amplitude=%ld mdeg mechanical, phase=%ld mdeg\r\n",
+        h2_enabled ? "on" : "off",h2_gain,
+        (long)(MOTOR_CONTROL_ENCODER_H2_AMPLITUDE_DEG*1000.0f),
+        (long)(MOTOR_CONTROL_ENCODER_H2_PHASE_DEG*1000.0f));
+  }
   else if (Same(arg,"stop")) FocVoltage_TripISR("user stop");
   else if (Same(arg,"start")) {
     if (active || MotorCalibration_IsActive() || !MotorControl_IsStopped() || CurrentSense_IsBusy()) {
@@ -465,6 +507,6 @@ bool FocVoltage_ProcessCommand(const char *command)
     target_d=d; target_q=q;
     __set_PRIMASK(mask);
     printf("FOC voltage set: Vd=%.3f V, Vq=%.3f V\r\n",(double)d,(double)q);
-  } else printf("Usage: foc voltage <Vd> <Vq> | foc current <Id> <Iq> | foc start | foc status | foc stop\r\n");
+  } else printf("Usage: foc voltage <Vd> <Vq> | foc current <Id> <Iq> | foc start | foc status | foc stop | foc h2 on/off/gain/status\r\n");
   return true;
 }

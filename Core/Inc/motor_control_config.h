@@ -4,6 +4,11 @@
 /* Motor and open-loop six-step parameters. */
 #define MOTOR_CONTROL_POLE_PAIRS                    7U
 
+/* 2/rev mechanical error: A*sin(2*theta_m + phase), sensor-zero reference.
+ * gain=+1 subtracts this error; -1 reverses it. Runtime default is OFF. */
+#define MOTOR_CONTROL_ENCODER_H2_AMPLITUDE_DEG       0.62f
+#define MOTOR_CONTROL_ENCODER_H2_PHASE_DEG           133.0f
+
 /* 角度通信の締切と鮮度。TIM1停止中はmainから低頻度取得する。 */
 #define MOTOR_CONTROL_ENCODER_TIMEOUT_US            100U
 #define MOTOR_CONTROL_ENCODER_STALE_MS              10U
@@ -17,7 +22,7 @@
  * CURRENT_LIMIT_AはFOC通常運転用。校正にはCAL_CURRENT_LIMIT_Aを使う。
  * いずれも電流指令値ではなく、超過時に出力を停止する閾値。 */
 #define MOTOR_CONTROL_CURRENT_LIMIT_A              20.0f
-#define MOTOR_CONTROL_CAL_CURRENT_LIMIT_A          10.0f
+#define MOTOR_CONTROL_CAL_CURRENT_LIMIT_A          15.0f
 /* N5065実測：1V/10Aで7回完走、最大約8.41A。通常運転用閾値とは独立。 */
 #define MOTOR_CONTROL_CAL_VOLTAGE                   1.0f
 #define MOTOR_CONTROL_VM_MIN_VOLTS                 6.0f
@@ -31,8 +36,8 @@
 #define MOTOR_CONTROL_CAL_WATCHDOG_MS               20U
 
 /* 機械1回転の診断専用。既存校正値は変更せず、低電圧で長時間走査する。 */
-#define MOTOR_CONTROL_CAL_MAP_VOLTAGE               0.4f
-#define MOTOR_CONTROL_CAL_MAP_CURRENT_LIMIT_A       5.0f
+#define MOTOR_CONTROL_CAL_MAP_VOLTAGE               0.8f
+#define MOTOR_CONTROL_CAL_MAP_CURRENT_LIMIT_A       10.0f
 #define MOTOR_CONTROL_CAL_MAP_POINTS                1000U
 #define MOTOR_CONTROL_CAL_MAP_SWEEP_MS              (MOTOR_CONTROL_CAL_SWEEP_MS * MOTOR_CONTROL_POLE_PAIRS)
 #define MOTOR_CONTROL_CAL_MAP_TRAVEL_TOLERANCE      0.05f
@@ -59,9 +64,9 @@
 #define MOTOR_CONTROL_CURRENT_KI_Q                  1.0f
 #define MOTOR_CONTROL_CURRENT_INTEGRAL_LIMIT_D      15.0f
 #define MOTOR_CONTROL_CURRENT_INTEGRAL_LIMIT_Q      15.0f
-#define MOTOR_CONTROL_CURRENT_REF_MAX_A             10.0f
+#define MOTOR_CONTROL_CURRENT_REF_MAX_A             15.0f
 #define MOTOR_CONTROL_CURRENT_SLEW_A_PER_SEC         15.0f
-#define MOTOR_CONTROL_CURRENT_MAX_VOLTS             2.0f
+#define MOTOR_CONTROL_CURRENT_MAX_VOLTS             5.0f
 
 /* Charge all three bootstrap capacitors before each PWM start. */
 #define MOTOR_CONTROL_BOOTSTRAP_CHARGE_US           750U

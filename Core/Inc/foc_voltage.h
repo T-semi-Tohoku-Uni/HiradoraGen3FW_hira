@@ -8,6 +8,10 @@
 /* 同じADC ISR内でのみ取得する観測値。角度はdq変換に実際に使用したrad値。 */
 typedef struct {
   float id_a, iq_a, electrical_rad;
+  /* Raw sensor mechanical/electrical angles; base includes direction/offset.
+   * correction is the signed electrical addition before wrapping (rad). */
+  float mechanical_raw_rad, electrical_raw_rad, electrical_base_rad;
+  float electrical_correction_rad;
   /* 電流PIと同じ組を観測できるよう、ADC番号と角度の出所を保存する。
    * cyclesはDWT（uint32_t周回）。ADC時刻はコールバック入口で、S/H時刻ではない。 */
   uint32_t adc_sequence, angle_sequence;

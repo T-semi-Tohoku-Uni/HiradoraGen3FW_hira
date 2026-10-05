@@ -184,13 +184,19 @@ void DmaLogger_Task(void)
     static const char *const keys[4]={"u1_a","v_a","u2_a","w_a"};
     for (unsigned i=0;i<4;i++)
       PutFixed(&out,keys[i],timestamp,((float)sample->raw[i]-zero_offsets[i])*scale);
-    PutInteger(&out,"sector",timestamp,sample->sector);
+    /* Sector is zero outside open-loop six-step commutation. */
+    if (sample->sector != 0U)
+      PutInteger(&out,"sector",timestamp,sample->sector);
     PutInteger(&out,"sample",NULL,sample->sequence);
     PutInteger(&out,"log_overrun",NULL,overruns);
     if (sample->foc_valid) {
       PutFixed(&out,"id_a",timestamp,sample->foc.id_a);
       PutFixed(&out,"iq_a",timestamp,sample->foc.iq_a);
       PutFixed(&out,"elec_rad",timestamp,sample->foc.electrical_rad);
+      PutFixed(&out,"mech_raw_rad",timestamp,sample->foc.mechanical_raw_rad);
+      PutFixed(&out,"elec_raw_rad",timestamp,sample->foc.electrical_raw_rad);
+      PutFixed(&out,"elec_base_rad",timestamp,sample->foc.electrical_base_rad);
+      PutFixed(&out,"elec_corr_rad",timestamp,sample->foc.electrical_correction_rad);
       /* unsigned差分でDWT周回を跨ぐ。真のセンサー測定遅延ではない。 */
       uint32_t request_age=sample->foc.adc_callback_cycles-sample->foc.angle_request_cycles;
       uint32_t received_age=sample->foc.adc_callback_cycles-sample->foc.angle_received_cycles;
