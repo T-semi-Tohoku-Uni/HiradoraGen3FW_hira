@@ -6,6 +6,8 @@ void MotorCalibration_Init(void);
 void MotorCalibration_Task(void);
 bool MotorCalibration_ProcessCommand(const char *command);
 bool MotorCalibration_IsActive(void);
+/* mainからの即時中止。PWM停止後にADC制御を終了し、結果を表示する。 */
+void MotorCalibration_Stop(void);
 /* ISRでは停止と理由の記録だけ。printf/HAL Flash/I2Cは呼ばない。 */
 void MotorCalibration_TripISR(const char *reason);
 void MotorCalibration_CurrentISR(const float currents[4], bool rails);

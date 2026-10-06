@@ -18,6 +18,7 @@ static uint32_t rx_clear, tx_clear, rx_tc, rx_te, tx_te;
 /* 初期化はCubeMX/HAL、転送中のSPIとDMAはこのモジュールが専有する。
  * HALの転送API/IRQ/Abortと混用しない（HALのStateは転送状態を表さない）。 */
 static bool fast_owned;
+static uint32_t cs_guard_cycles, cs_high_cycles;
 static void FrameComplete(void);
 static void StopDma(void)
 {
@@ -46,7 +47,7 @@ static volatile uint8_t published;
 #define latest samples[published]
 static volatile bool diagnostic_ok, read_error_next;
 static volatile uint32_t diagnostic_ms, start_cycles, last_start_cycles;
-static volatile uint32_t transfers, spi_errors, parity_errors, sensor_errors, timeouts, missed;
+static volatile uint32_t transfers, spi_errors, parity_errors, sensor_errors, timeouts, missed, decode_waits;
 static volatile uint32_t transfer_cycles, max_transfer_cycles, interval_cycles, max_interval_cycles, max_launch_cycles;
 static volatile uint16_t diagnostic, error_flags;
 static uint32_t fallback_ms, report_ms;
@@ -75,10 +76,21 @@ static bool OddParity(uint16_t word)
   word ^= word >> 8; word ^= word >> 4; word ^= word >> 2; word ^= word >> 1;
   return (word & 1U) != 0U;
 }
-static void DelayUs(void)
+/* AS5047P DS000324 v2-00 Figure 12: CS setup/high >=350 ns、hold >= SCK半周期。
+ * 従来の各1us待ちを、500ns以上かつ半SCK周期以上の共通ガードへ短縮する。
+ * initでCPU/APB2クロックから切上げ計算。実際のGPIO/関数の時間はさらに加わる。
+ * DWT差はunsignedで計算し周回に対応。割り込みを禁止せず長くなる方向を許容。
+ * SPI/DMAレジスタ操作の順序、BSY確認、各フレームのCS区切りは維持する。 */
+static void DelayCsSince(uint32_t start)
 {
-  uint32_t start = DWT->CYCCNT;
-  while ((uint32_t)(DWT->CYCCNT - start) < SystemCoreClock / 1000000U) { }
+  while ((uint32_t)(DWT->CYCCNT - start) < cs_guard_cycles) { }
+}
+static void DelayCs(void) { DelayCsSince(DWT->CYCCNT); }
+static void RaiseCs(void)
+{
+  SPI1_SS_GPIO_Port->BSRR = SPI1_SS_Pin;
+  __DSB(); /* GPIO書込み完了後を基準にしてHigh時間を短く見積もらない。 */
+  cs_high_cycles=DWT->CYCCNT;
 }
 static bool Expired(void)
 {
@@ -97,11 +109,16 @@ static void StartFrame(uint16_t word)
   tx_word = word;
   rx_dma->CNDTR = 1U;
   tx_dma->CNDTR = 1U;
+  /* 前フレームのHigh後に行ったDMA準備/解析の時間もガードに算入する。
+   * 時間が足りない場合だけ待つため、条件を緩めず重複待ちを削減できる。 */
+  DelayCsSince(cs_high_cycles);
   SPI1_SS_GPIO_Port->BSRR = (uint32_t)SPI1_SS_Pin << 16U;
+  __DSB();
+  uint32_t cs_low_cycles=DWT->CYCCNT;
   __DMB(); /* DMAが読むRAMへの書き込みを、DMA起動より先に完了させる。 */
   SET_BIT(rx_dma->CCR, DMA_CCR_EN);
   SET_BIT(encoder_spi->Instance->CR2, SPI_CR2_RXDMAEN | SPI_CR2_ERRIE);
-  DelayUs(); /* AS5047PのCS setup。クロック速度・CS待ち時間は従来のまま。 */
+  DelayCsSince(cs_low_cycles); /* RX準備時間も含め、setupは500ns以上確保。 */
   SET_BIT(tx_dma->CCR, DMA_CCR_EN);
   IrqTrace_Event(TRACE_LAUNCH);
   SET_BIT(encoder_spi->Instance->CR2, SPI_CR2_TXDMAEN);
@@ -139,6 +156,8 @@ static void StartRead(void)
     if (state == REQUEST || state == RESPONSE) {
       missed++;
       if (Expired()) { RecordFault("TIM transfer timeout"); timeouts++; Fail(); }
+    } else if (state == DECODING) {
+      decode_waits++; /* 転送済みでも角度公開待ちなら次の取得を開始できない。 */
     }
     return;
   }
@@ -172,9 +191,10 @@ static void FrameComplete(void)
   if (state == RESPONSE) state = DECODING;
   uint16_t response = rx_word;
   /* BSY解除を確認済み。各16bitの間でCSをHighに戻す。 */
-  DelayUs();
-  SPI1_SS_GPIO_Port->BSRR = SPI1_SS_Pin;
-  DelayUs();
+  DelayCs();
+  RaiseCs();
+  /* Highガードは次回StartFrame側で残り時間を確認する。
+   * RESPONSEでは角度の解析・公開を先に進めてもCSをLowにしないため安全。 */
   if (state == REQUEST) {
     state = RESPONSE;
     StartFrame(0U); /* NOPが前フレームの要求に対応するデータを返す。 */
@@ -207,9 +227,17 @@ static void FrameComplete(void)
     sample->request_cycles = start_cycles; sample->received_cycles = received;
     sample->updated_ms = HAL_GetTick(); sample->sequence = latest.sequence + 1U;
     sample->valid = diagnostic_ok && state == DECODING;
+    /* 公開と要求受付再開を一緒に確定する。
+     * 公開だけ先に済ませてTIM/ADCに中断されると、FOCは新角度を読めても
+     * StartReadがDECODINGを見て次の要求を見送る。旧ISRの末尾で新転送の
+     * stateを上書きしないよう、この枝は公開後すぐreturnする。 */
+    uint32_t mask=__get_PRIMASK(); __disable_irq();
     __DMB();
     published = next;
+    state = IDLE;
     IrqTrace_Event(TRACE_PUBLISH);
+    __set_PRIMASK(mask);
+    return;
   }
   __DMB();
   if (state == DECODING) state = IDLE;
@@ -247,9 +275,10 @@ static void PrintStatus(void)
          (sample_timer != NULL && (sample_timer->Instance->CR1 & TIM_CR1_CEN)) ? "TIM1" : "main",
          (unsigned long)transfers, transfer_cycles * us, max_transfer_cycles * us,
          interval_cycles * us, max_interval_cycles * us, max_launch_cycles * us);
-  printf("Encoder errors: spi=%lu, parity=%lu, sensor=%lu, timeout=%lu, busy_ticks=%lu, diag=0x%04X, errfl=0x%04X; displayed electrical angle is uncalibrated\r\n",
+  printf("Encoder errors: spi=%lu, parity=%lu, sensor=%lu, timeout=%lu, busy_ticks=%lu, decode_waits=%lu, diag=0x%04X, errfl=0x%04X\r\n",
          (unsigned long)spi_errors, (unsigned long)parity_errors, (unsigned long)sensor_errors,
-         (unsigned long)timeouts, (unsigned long)missed, (unsigned int)diagnostic, (unsigned int)error_flags);
+         (unsigned long)timeouts, (unsigned long)missed, (unsigned long)decode_waits, (unsigned int)diagnostic, (unsigned int)error_flags);
+  printf("Angle display: elec_uncal is before direction/offset correction. FOC uses calibration; check 'cal status' for validity and Flash save status.\r\n");
   printf("Encoder first fault: %s, state=%lu, elapsed=%lu ns, SR=0x%08lX, RXleft=%lu, TXleft=%lu, DMA=0x%08lX\r\n",
       first_fault ? first_fault : "none", (unsigned long)fault_state,
       (unsigned long)((float)fault_cycles*(1e9f/(float)SystemCoreClock)),
@@ -274,7 +303,7 @@ bool AS5047P_ProcessCommand(const char *command)
   }
   if (Equals(command, "angle") || Equals(command, "angle start")) {
     streaming = true; report_ms = HAL_GetTick() - 100U;
-    printf("Angle display started (uncalibrated electrical angle)\r\n");
+    printf("Angle display started: elec_uncal is before direction/offset correction (not calibration status). Check 'cal status'.\r\n");
   } else if (Equals(command, "angle stop")) {
     streaming = false;
     printf("Angle display stopped; DMA acquisition continues\r\n");
@@ -302,8 +331,8 @@ void AS5047P_Task(void)
     }
     __HAL_SPI_CLEAR_OVRFLAG(encoder_spi);
     HAL_StatusTypeDef result = idle ? HAL_SPI_Init(encoder_spi) : HAL_ERROR;
-    SPI1_SS_GPIO_Port->BSRR = SPI1_SS_Pin;
-    DelayUs();
+    RaiseCs();
+    DelayCs();
     if (result == HAL_OK) __HAL_SPI_ENABLE(encoder_spi);
     state = result == HAL_OK ? IDLE : OFF;
     if (result != HAL_OK) printf("Encoder DMA recovery failed; reset required\r\n");
@@ -322,7 +351,7 @@ void AS5047P_Init(SPI_HandleTypeDef *spi, TIM_HandleTypeDef *timer)
     printf("Encoder DMA configuration missing\r\n"); return;
   }
   /* 16bit・通常DMA専用。CubeMX設定が変わったら黙って不正転送せず停止する。 */
-  if (spi->Init.DataSize != SPI_DATASIZE_16BIT || spi->Init.Mode != SPI_MODE_MASTER ||
+  if (spi->Instance != SPI1 || spi->Init.DataSize != SPI_DATASIZE_16BIT || spi->Init.Mode != SPI_MODE_MASTER ||
       spi->Init.Direction != SPI_DIRECTION_2LINES || spi->Init.NSS != SPI_NSS_SOFT ||
       spi->Init.CRCCalculation != SPI_CRCCALCULATION_DISABLE ||
       spi->hdmarx->Init.Mode != DMA_NORMAL || spi->hdmatx->Init.Mode != DMA_NORMAL ||
@@ -336,6 +365,13 @@ void AS5047P_Init(SPI_HandleTypeDef *spi, TIM_HandleTypeDef *timer)
       spi->hdmatx->Init.PeriphInc != DMA_PINC_DISABLE) {
     printf("Encoder fast DMA configuration unsupported\r\n"); return;
   }
+  /* このドライバはSPI1/APB2専用。動作中のクロック変更には再Initが必要。
+   * BR値は2,4,...256分周。遅いSPI設定でもholdを短くし過ぎない。 */
+  uint32_t spi_divider=2U << (spi->Init.BaudRatePrescaler >> SPI_CR1_BR_Pos);
+  uint32_t pclk=HAL_RCC_GetPCLK2Freq();
+  cs_guard_cycles=(SystemCoreClock+1999999U)/2000000U;
+  uint32_t half_sck=(uint32_t)(((uint64_t)SystemCoreClock*spi_divider+2ULL*pclk-1U)/(2ULL*pclk));
+  if (cs_guard_cycles<half_sck) cs_guard_cycles=half_sck;
   encoder_spi = spi; sample_timer = timer;
   rx_dma = spi->hdmarx->Instance; tx_dma = spi->hdmatx->Instance;
   rx_clear = __HAL_DMA_GET_GI_FLAG_INDEX(spi->hdmarx);
@@ -354,7 +390,7 @@ void AS5047P_Init(SPI_HandleTypeDef *spi, TIM_HandleTypeDef *timer)
   /* DWTは既存処理と共用し、カウンタをリセットしない。 */
   SET_BIT(CoreDebug->DEMCR, CoreDebug_DEMCR_TRCENA_Msk);
   SET_BIT(DWT->CTRL, DWT_CTRL_CYCCNTENA_Msk);
-  SPI1_SS_GPIO_Port->BSRR = SPI1_SS_Pin;
+  RaiseCs();
   HAL_Delay(10U);
   state = IDLE;
   uint32_t began = HAL_GetTick();
@@ -369,7 +405,7 @@ void AS5047P_Pause(void)
   if (!fast_owned) { __set_PRIMASK(mask); return; }
   state = OFF; StopDma();
   (void)WaitIdle();
-  SPI1_SS_GPIO_Port->BSRR = SPI1_SS_Pin;
+  RaiseCs();
   latest.valid = false; diagnostic_ok = false;
   __set_PRIMASK(mask);
 }

@@ -2,10 +2,17 @@
 #define FOC_VOLTAGE_H
 #include <stdbool.h>
 #include <stdint.h>
+/* Shared FOC lifecycle: voltage command or current PI, selected while stopped.
+ * foc current <Id_A> <Iq_A> / foc voltage <Vd_V> <Vq_V>, then foc start.
+ * Zero current keeps regulation active; foc stop disables PWM. */
 /* 同じADC ISR内でのみ取得する観測値。角度はdq変換に実際に使用したrad値。 */
 typedef struct {
   float id_a, iq_a, electrical_rad;
-  /* 将来の電流PIにも同じ組を渡せるよう、ADC番号と角度の出所を保存する。
+  /* Raw sensor mechanical/electrical angles; base includes direction/offset.
+   * correction is the signed electrical addition before wrapping (rad). */
+  float mechanical_raw_rad, electrical_raw_rad, electrical_base_rad;
+  float electrical_correction_rad;
+  /* 電流PIと同じ組を観測できるよう、ADC番号と角度の出所を保存する。
    * cyclesはDWT（uint32_t周回）。ADC時刻はコールバック入口で、S/H時刻ではない。 */
   uint32_t adc_sequence, angle_sequence;
   uint32_t adc_callback_cycles, angle_request_cycles, angle_received_cycles;

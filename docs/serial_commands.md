@@ -1,5 +1,13 @@
 # シリアルコマンド一覧
 
+## FOCの2/rev角度補正
+
+`foc h2 on` / `foc h2 off`、`foc h2 gain 0` / `+1` / `-1`、`foc h2 status`で操作します。
+起動時OFF、gain=+1。運転・ADCログ中も変更可能です。
+`cal map`→`cal map apply`→`cal save`で係数を取得・適用・保存します。
+電気角誤差`a2*cos(2*theta_m)+b2*sin(2*theta_m)` [rad_elec]をgain=+1で減算します。
+raw角度を保持し、FOC使用角だけに適用します。[式・ログ・試験手順](encoder_h2.md)を参照してください。
+
 ## 母線電圧VM
 
 `vm`で最新の母線電圧、VREF+、PC2 raw値、更新からの時間、状態を表示します。
@@ -8,7 +16,7 @@ ADCログ中も使用できます。起動時にも64組の平均によるVMを�
 - PC2/ADC1_IN8。100 kΩ / 10 kΩ分圧をVREFINTから求めたVREF+で換算します。
 - `motor_control_config.h`で公称24 V、上限30 V、分圧抵抗と取得周期を変更できます。
 - `OK`は測定正常、`OVER LIMIT`は上限以上、`INVALID/STALE`は取得失敗または100 ms以上未更新です。
-- 校正中はVM異常・上下限でPWMを停止します。従来のmanual/six-stepは表示のみです。電流PI制御は未実装です。
+- 校正中はVM異常・上下限でPWMを停止します。従来のmanual/six-stepは表示のみです。電流PIは[専用コマンド](current_pi.md)で使用できます。
 - 約1 ms間隔を目標にmainで取得します。他タスク・UART出力により間隔は延びます。
 - 取得中は短時間mainの他タスクを後回しにします。割り込みは無効化しません。
 - ADC1 regularはVREFINT/VMの2ランク、discontinuousで1ランクずつ開始。
@@ -33,19 +41,21 @@ ADCログ中も上記コマンドを使用できます。既存のUART DMA送信
 角度表示は最新スナップショットを参照し、別のSPI転送は開始しません。
 
 - SPI1はMode 1、16 bit、5 MHzのまま。RX/TX DMA Normalで要求＋NOPの2フレームを取得。
-- 各フレームでCSをHighへ戻し、setup/hold/highの各1 usを確保します。
+- 各フレームでCSをHighへ戻します。setup/hold/highの共通ガードは500 ns以上、かつSCK半周期以上です。
+  GPIO切替からの経過時間を確認し、DMA準備・解析と重複する待ちを削減しています。
 - TIM1動作中は底で取得開始（約20 kHz）。停止中はmainから取得し、現状約2 ms間隔です。
   `stop`後も角度観測は継続しますが、タイマやモーター出力を角度モジュールから開始しません。
 - DIAAGCを約20 msごとに読みます。この周期は角度要求に代わって診断を行うため、角度更新が一回飛びます。
 - rawはANGLECOMの14 bit値。機械角はraw×2π/16384、電気角は極対数倍して2πで折り返します。
   内部はrad、表示はdegree、正方向はエンコーダー増加方向です。
-- **elec_uncal表示は校正値を適用しない観測値です。校正・Flash保存は下記calコマンドで行います。電流PI制御は未実装です。**
+- **elec_uncal表示は校正値を適用しない観測値です。校正・Flash保存は下記calコマンドで行います。電流PIは[専用コマンド](current_pi.md)で使用できます。**
 - parity、EF、LF/磁界診断、取得鮮度を確認します。通信失敗時はDMA要求を止め、mainでFIFOを排出しHAL_SPI_Initで復旧します。
   100 us超過はtimeout、取得10 ms以上未更新または診断100 ms以上未更新はINVALID/STALEです。
 - `request_cycles`は要求開始、`received_cycles`は応答完了後のDWT値です。
   センサー内部の測定時刻を意味しません。160 MHzでは約26.8秒で周回します。
 - `transfer`は2フレーム開始からCS終了までの経過時間で、CPU使用率ではありません。
   `launch_max`は要求開始処理の経過時間、`busy_ticks`は前の転送がまだ完了していない周期数です。
+  `decode_waits`は転送完了後の解析・公開待ちで次の要求を見送った回数です。両方を確認してください。
   最大値は起動以来で、`interval`にはTIM1/main間の切替やmain遅延も含まれます。
 
 ### 実機測定と残る確認
@@ -86,7 +96,8 @@ Release実機でFOC＋約200 Hzログ中に3指令一括送信を20回行い、6
 CubeMX/HALで初期設定し、毎回のDMA起動とIRQ処理のみレジスタ操作で短縮しました。
 RXのTCと送受信TEを監視し、HTとTXのTC割り込みは使用しません。
 DMA停止→フラグ消去→転送数設定→RX準備→TX起動の順序と、BSY解除後のCS操作を守ります。
-BSY待ちはDWTで10 usに制限します。SPIクロックとCS待ち時間、CubeMX設定は変更していません。
+BSY待ちはDWTで10 usに制限します。SPIクロックとCubeMX設定は維持しています。
+2026-09-28にCSガードの短縮と公開・受付状態の同時切替を追加しました。
 SPI1/DMAは角度モジュールが専有し、HALの転送API/IRQ/Abortとは混用しない構成です。
 IRQへの入口はUSER CODE内に置き、理由・制約はas5047p.cに日本語コメントを記載しています。
 専用DMA化後もRelease 60件・Debug 30件のコマンド試験を実施し、UART/ADCログのoverrunは0でした。
@@ -135,7 +146,7 @@ Id/Iqは`MOTOR_CONTROL_FOC_CURRENT_POLARITY`で極性を補正した観測値で
 2026-09-25の±Vq/±Vd試験に基づき現在は−1です。相電流ログは従来のADC符号を維持します。
 Uの2ランクを平均し、V/Wとともに共通成分を除去してClarke/Park変換します。
 電流サンプルは完全同時ではなく、dq変換には制御で使った角度を使うため角度の時間差もあります。
-電流PIへ接続する前に極性・サンプル時刻を追加検証します。
+電流PIでも同じ極性と観測を使用します。サンプル時刻の評価は継続課題です。
 
 ### 制御周期と観測時間
 
@@ -144,7 +155,7 @@ ADC電流処理で最新の有効な角度を1回取得し、同じスナップ�
 今回計算したCCRは次のPWM頂点で反映します。
 TIM1 CH4（PWM1、CCR4=3998）の立上りは下降時の頂点直後で、2ランクのADC変換完了も頂点後です。
 初回は0 Vのまま新しい角度とADCサンプルを待ちます。診断フレームで角度更新が飛ぶため、
-要求開始から250 us以内の角度を受け付けます。角度外挿・電流PIは未実装です。
+要求開始から250 us以内の角度を受け付けます。角度外挿は未実装です。電流PIは[専用コマンド](current_pi.md)で使用できます。
 
 RCR=1は維持し、FOC開始時だけ出力OFFで頂点/下降方向に揃えてUG後にCNT=ARRとします。
 最初の底では更新せず、次の頂点でPWMへ反映します。校正・手動PWM・ADC単独は底基準を維持します。
@@ -181,12 +192,85 @@ Vd/Vqシリアル運転は下記のFOCコマンドで行います。
 | コマンド | 動作 |
 |---|---|
 | `cal start` | 停止中のみ、相順と電気角offsetを手動校正 |
-| `cal status` | 校正有効性、段階、保存状態、相順、offset、停止理由 |
+| `cal map` | 校正済み・停止中のみ、機械1回転の往復角度誤差をCSV出力。校正値は変更しない |
+| `cal map apply` | 停止中のみ、正常mapの候補a2/b2をRAM適用。direction/offsetは維持 |
+| `cal status` | 校正有効性、段階、保存状態、相順、offset、H2現在値・候補、停止理由 |
 | `cal stop` / `stop` | 校正を中止し全PWM出力を停止 |
 | `cal save` | 成功したRAM校正値をFlashへ保存・読み戻し検証（PWM/ADC停止中のみ） |
-| `cal test` | 停止中に電圧変換・往復判定・保存データ検査の586項目を実行。通電・Flash書き込みなし |
+| `cal test` | 停止中にCRC対象拡張を含む計659項目を実行。通電・Flash書き込みなし |
 
-手順：
+### `cal map`: 機械1回転の誤差測定とH2候補計算
+
+有効な校正値（RAMまたは起動時に読み込んだFlash値）が必要です。
+未校正なら先に`cal start`を実行してください。PWM停止・ADCログidle・有効で新鮮な
+エンコーダー値と範囲内のVMを確認して開始します。ローターは両方向に自由に1回転できる
+状態にしてください。directionに従って機械360°を往復するため、電気角正方向が
+エンコーダー角の正方向と一致するとは限りません。
+
+```text
+stop
+adc stop
+cal status
+cal map
+```
+
+ADCログの終了を待ってから`cal map`を送ります。map専用設定は長時間通電を考慮した
+Vd=0.8 V、Vq=0 V、相過電流停止10 Aです。現在角度に対応した電気角で500 ms rampし、
+各方向28秒で走査します（4000 ms × 7極対）。静止確認と保持を含む全体は約59秒です。
+通常の`cal start`は1 V / 15 Aです。
+
+状態遷移は`MAP_CHECK_STILL → MAP_RAMP → MAP_HOLD_START → MAP_FORWARD →
+MAP_HOLD_END → MAP_BACKWARD → MAP_HOLD_RETURN → PWM OFF`です。
+保持の最後200 msで20サンプル以上、角度幅0.15 electrical rad以下を確認します。
+往路の機械移動量は符号も含め`direction × 2π`に対し5%以内、戻りは開始位置から
+電気角換算0.15 rad以内であることを検証します。戻り量はwrapせず脱調を検出します。
+
+`CALMAP_BEGIN`、`CALMAP_HEADER`に続き、`CALMAP,F,0,...`～`CALMAP,F,999,...`、
+`CALMAP,R,0,...`～`CALMAP,R,999,...`をUARTへ出力します。
+点はprogressに対し均等に配置し、新しいエンコーダー更新につき最大1点取得します。
+Task実行の粒度による小さな時刻ずれはあります。測定点を飛ばした場合は補間・穴埋めせず停止します。
+
+```text
+CALMAP_HEADER,pass,index,elapsed_ms,cmd_delta_e_rad,cmd_elec_rad,mech_raw_rad,mech_unwrapped_rad,error_e_rad,U1_A,V_A,U2_A,W_A
+```
+
+`elapsed_ms`は各方向の走査開始からの測定時刻、角度はすべてrad、電流はAです。
+指令角は直前のTaskで設定した電圧指令を記録します。電流は短い割り込み禁止区間で
+取得した最新4相スナップショットであり、エンコーダーと完全同時刻の測定ではありません。
+
+```text
+measured_elec = wrap_0_2pi(direction × pole_pairs × mech_raw - old_offset)
+error_e = wrap_signed_pi(measured_elec - cmd_elec)
+mean_error = atan2(sum(sin(error_e)), sum(cos(error_e)))
+candidate_offset = wrap_0_2pi(old_offset + mean_error_combined)
+bidirectional_difference = wrap_signed_pi(mean_error_forward - mean_error_reverse)
+resultant = hypot(sum(sin(error_e)), sum(cos(error_e))) / count
+```
+
+`error_e`は**electrical radians**です。センサー位置依存誤差だけでなく、offset残差、
+磁界への追従遅れ、摩擦・コギングを含みます。正逆別と全2000点の円周平均を出力し、
+正逆差とresultantから方向依存性・ばらつきを確認できます。resultantは1に近いほど集中しています。
+正常終了時のみ`CALMAP_SUMMARY`～`CALMAP_END`を出力します。
+
+`candidate_offset`は表示だけです。成功・失敗・中止のいずれでも既存record、VALID、
+保存状態、Flashを変更しません。H2係数はF/R別に定数項付き最小二乗で求め、平均を候補表示します。
+`cal map apply`が候補a2/b2をRAMに適用し、`cal save`が適用中の校正値全体を保存します。
+apply前のsaveは現在値を保存します。候補を自動採用しません。
+[2/rev補正の式・位相定義・Flash互換性](encoder_h2.md)を参照してください。補正LUT・OTP書込みはありません。
+
+`stop` / `cal stop`で即時にPWM停止・ADC制御終了できます。動作中も過電流、ADC飽和・
+更新停止、VM上下限・有効性、encoder有効性・鮮度、nFAULT、main watchdogを監視します。
+異常時はPWM停止を優先し、main側で`CALMAP_STOP`の理由・stage・経過時間とpeak電流、
+過電流時にはtrip電流を出力します。`cal status`にはmap段階と取得点数が追加されます。
+
+約120～140 bytes/点、約35.7点/秒なので、測定CSVは約4.3～5.0 kB/s
+（8N1で約43～50 kbit/s、921600 bpsの約5%）です。他のログやコマンド出力は別枠です。
+1000点配列は確保せず、2方向のsin/cos積算とカウンターだけを保持します。
+
+実装・ビルド・エミュレーション確認と実機確認手順は
+[cal map検証記録](cal_map_validation.md)を参照してください。
+
+### 通常校正 `cal start` の手順
 
 1. `stop`、`adc stop`を送り、ADC停止完了を待つ。
 2. ローターが自由に動ける状態で`cal start`。通常約16秒で予備整列と往復校正を行う。
@@ -221,7 +305,7 @@ CubeMXのPWM・ADC設定は変更していません。
 設定は`motor_control_config.h`：極対数7、KV140、公称24 V・上限30 V、
 校正電圧1.0 V、校正過電流10 A、FOC通常運転用電流上限5 A、電圧出力上限3 Vなど。
 校正は`MOTOR_CONTROL_CAL_CURRENT_LIMIT_A`だけを使い、通常運転用5 Aと独立して判定します。
-FOC運転では通常運転用5 Aを使います。電流PI制御は未実装です。
+FOC運転では設定ヘッダーの通常運転用CURRENT_LIMIT_A（現在10 A）を使います。電流PIは[専用コマンド](current_pi.md)で使用できます。
 KVは保存データの設定照合用で、定格電流や校正電圧の推定には使用しません。
 モーター・相配線・エンコーダー取付を変更したら`MOTOR_CONTROL_MOTOR_ID`を更新して再校正してください。
 相順`direction`は+1または-1、UVW基準の電気角は`direction * pole_pairs * mechanical_angle - offset`。
@@ -258,7 +342,8 @@ UART errors/overrunとADCログoverrunは0でした。監視継続の確認で�
 ユーザー管理の`STM32G431xx_CAL_FLASH.ld`でプログラムを126 KiBに制限し、
 最終ページ`0x0801F800..0x0801FFFF`（2 KiB）を予約します。CubeMX生成リンカは変更していません。
 CMakeが予約版を選択します。別IDEのビルドでもこのリンカを使用してください。
-32バイトのレコードに版番号・モーターID・極対数・KV・相順・offset・magic・CRC32を格納します。
+version 2の40バイトのレコードに版番号・モーターID・極対数・KV・相順・offset・H2係数a2/b2・magic・CRC32を格納します。
+旧version 1（32バイト）は検証後、H2係数ゼロとしてRAMへ移行します。Flashの新形式への保存は`cal save`で行います。
 HALで1ページを消去し、magic/CRCを含む最後のdoublewordまで書いた後、読み戻して検証します。
 単一ページなので保存中の電断では旧値も失われ得ます。その場合は警告後、手動再校正が必要です。
 未保存の再校正結果は再起動で失われ、以前保存済みの値があればそれを読みます。
@@ -372,10 +457,10 @@ VREF+=3.3Vなら約0.1145 A/countです。係数は起動時に固定し、運�
 | `adc stop` | 取得を止め、端数を含め送信待ちデータをDMAで送信。モーター状態は維持 |
 | `stop` | PWMを停止し、ロガーも停止・残データ送信 |
 
-- ログはU1・V・U2・Wの電流値[A]、セクタ番号、間引き前のサンプル番号です。
+- ログの基本項目はU1・V・U2・Wの電流値[A]、間引き前のサンプル番号、欠落数です。強制転流中だけセクタ番号を追加します。
   U1/Vは同時変換、その直後にU2/Wを同時変換します。
 - FWは起動時のオフセットとA/countから`u1_a`、`v_a`、`u2_a`、`w_a`へ換算します。
-  `sector`は120度駆動のステップ1～6、停止・手動PWM時は0です。
+  `sector`は強制転流（120度駆動）のステップ1～6です。停止・手動PWM・FOC・校正時は項目自体を出力しません。
 - PWM動作中・停止中のどちらでも取得できます。PWM停止中はモーター出力を無効にしたまま
   TIM1をトリガー専用に動作させ、`adc stop`でTIM1を戻します。
 - 以前の固定長キャプチャとは異なり、ログ開始後にモーターを自動停止しません。
@@ -502,10 +587,19 @@ TIM/ADC/RX DMA入口・出口等のサイクル時刻を出力します。計測
 再度`angle trace`を送ると以前の記録を消去します。通常は予約せず使用してください。
 
 FOC中の`adc` / `adc 100`には、相電流と同じ周期の`id_a`・`iq_a`・`elec_rad`も出力します。
-単位・角度の意味は[DMAロガー](dma_logger.md)を参照してください。電流PI制御は追加していません。
+単位・角度の意味は[DMAロガー](dma_logger.md)を参照してください。電流PIの指令・設定は[電流PI](current_pi.md)を参照してください。
 
 [電流の極性・相順・換算値の検証結果](current_validation_2026-09-25.md)：dq観測の極性を補正しました。
 絶対電流の外部照合とサンプリング時刻の評価は未完了です。
 
 FOC中のADCログに`angle_age_us`と`angle_rx_age_us`を追加しました。
 [電流・角度の時刻対応](timing_alignment_2026-09-25.md)を参照してください。
+
+[2026-09-28のエンコーダー時間余裕改善](encoder_margin_2026-09-28.md)：CS待ちとDebugの周期処理ビルド設定を改善しました。
+
+## 電流PIコマンド
+
+oc current <Id_A> <Iq_A>で電流モードを選択し、oc startで開始します。
+モード変更は停止中のみ。運転中の電流指令変更は可能です。
+oc current 0 0は制御を継続し、stopまたはoc stopでPWMを停止します。
+暫定ゲイン・上限・表示項目は[電流PI](current_pi.md)を参照してください。

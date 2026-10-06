@@ -6,13 +6,18 @@
 #include "as5047p.h"
 #include "voltage_vector.h"
 #include "console.h"
+#include "foc_voltage.h"
+#include "h2_fit.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
 #define PI 3.14159265358979323846f
 #define TWO_PI (2.0f*PI)
-typedef enum { IDLE, CHECK_STILL, RAMP, HOLD_ZERO, FORWARD, HOLD_END, BACKWARD, HOLD_RETURN, APPROACH, HOLD_APPROACH } CalStage;
+typedef enum { IDLE, CHECK_STILL, RAMP, HOLD_ZERO, FORWARD, HOLD_END, BACKWARD, HOLD_RETURN, APPROACH, HOLD_APPROACH,
+  MAP_CHECK_STILL, MAP_RAMP, MAP_HOLD_START, MAP_FORWARD, MAP_HOLD_END, MAP_BACKWARD, MAP_HOLD_RETURN } CalStage;
+typedef enum { CAL_OP_NONE, CAL_OP_NORMAL, CAL_OP_MAP } CalOperation;
+static volatile CalOperation operation;
 static volatile CalStage stage;
 static CalibrationRecord record;
 static bool calibrated, saved;
@@ -29,6 +34,37 @@ static uint32_t stage_ms, task_ms, sequence;
 static float previous_angle, position, origin, end_position, approach_start;
 static float sum, minimum, maximum;
 static unsigned count;
+typedef struct { float sum_sin, sum_cos; unsigned count; } MapStats;
+static MapStats map_stats[2];
+static H2Fit map_fit[2];
+static bool map_candidate_valid;
+static float map_candidate_a2, map_candidate_b2;
+static CalibrationRecord map_source;
+static float map_base, map_origin_position, map_forward_travel;
+static float map_command_delta, map_command_progress;
+static void StartMap(void);
+static void MapTask(uint32_t now, const AS5047P_Sample *sample, bool fresh, float vm);
+static float CurrentLimit(void)
+{
+  return operation == CAL_OP_MAP ? MOTOR_CONTROL_CAL_MAP_CURRENT_LIMIT_A : MOTOR_CONTROL_CAL_CURRENT_LIMIT_A;
+}
+/* 電圧/offsetは0..2pi、差分は符号付きの-pi..piで扱う。 */
+static float SignedAngle(float angle) { return remainderf(angle, TWO_PI); }
+static void MapAccumulate(MapStats *stats, float error)
+{
+  stats->sum_sin += sinf(error); stats->sum_cos += cosf(error); stats->count++;
+}
+static float MapMean(const MapStats *stats) { return atan2f(stats->sum_sin, stats->sum_cos); }
+static float MapCandidate(const CalibrationRecord *r, const MapStats stats[2])
+{
+  return VoltageVector_Wrap(r->offset + atan2f(stats[0].sum_sin + stats[1].sum_sin,
+                                             stats[0].sum_cos + stats[1].sum_cos));
+}
+static bool MapTravelValid(float travel, int32_t direction)
+{
+  return isfinite(travel) && (direction == 1 || direction == -1) &&
+    fabsf(travel - (float)direction*TWO_PI) <= TWO_PI*MOTOR_CONTROL_CAL_MAP_TRAVEL_TOLERANCE;
+}
 static bool Same(const char *text, const char *expected)
 {
   while (*expected) if (tolower((unsigned char)*text++) != *expected++) return false;
@@ -57,9 +93,9 @@ void MotorCalibration_CurrentISR(const float currents[4], bool rails)
   if (rails) { MotorCalibration_TripISR("ADC saturated"); return; }
   for (unsigned i=0; i<4; i++) {
     if (fabsf(currents[i]) > peak_current) peak_current = fabsf(currents[i]);
-    /* 校正は専用の10A閾値で判定。通常運転用の5Aを重ねて適用しない。
+    /* 通常校正10A / map 5Aを選択。FOC通常運転用の閾値は重ねない。
      * NaN/InfとADC飽和の停止は従来どおり維持する。 */
-    if (!isfinite(currents[i]) || fabsf(currents[i]) > MOTOR_CONTROL_CAL_CURRENT_LIMIT_A) {
+    if (!isfinite(currents[i]) || fabsf(currents[i]) > CurrentLimit()) {
       if (!trip_captured) {
         for (unsigned j=0; j<4; j++) trip_current[j] = currents[j];
         trip_stage = (uint32_t)stage; trip_elapsed = HAL_GetTick()-stage_ms;
@@ -88,28 +124,52 @@ static void Finish(const char *reason)
 {
   /* 出力停止を先に行い、その後でADCとログを閉じる。Flash操作は別の明示コマンド。 */
   MotorControl_Stop(); energized = false;
-  CurrentSense_EndControl(); stage = IDLE;
+  CurrentSense_EndControl();
+  CalStage stopped_stage = stage; stage = IDLE;
+  if (operation == CAL_OP_MAP) printf("CALMAP_STOP,reason=%s,stage=%u,elapsed_ms=%lu\r\n",
+    reason,(unsigned)stopped_stage,(unsigned long)(HAL_GetTick()-stage_ms));
   printf("Calibration %s; PWM stopped\r\n", reason);
   printf("Calibration peak (all ADC samples): %.3f A\r\n", (double)peak_current);
   if (trip_captured) printf("Calibration trip: stage=%lu, elapsed=%lu ms, requested=%.3f V, "
       "U1=%.3f V=%.3f U2=%.3f W=%.3f A, peak=%.3f A, cal_limit=%.3f A\r\n",
       (unsigned long)trip_stage, (unsigned long)trip_elapsed, (double)requested_voltage,
       (double)trip_current[0], (double)trip_current[1], (double)trip_current[2], (double)trip_current[3],
-      (double)peak_current, (double)MOTOR_CONTROL_CAL_CURRENT_LIMIT_A);
+      (double)peak_current, (double)CurrentLimit());
+  operation = CAL_OP_NONE;
 }
 void MotorCalibration_Init(void)
 {
-  calibrated = CalibrationStore_Load(&record); saved = calibrated;
-  if (calibrated) printf("Calibration loaded: direction=%ld, offset=%.6f rad\r\n",
-                         (long)record.direction, (double)record.offset);
+  calibrated = CalibrationStore_Load(&record);
+  saved = calibrated && CalibrationStore_IsCurrentFormat();
+  map_candidate_valid=false;
+  if (calibrated) printf("Calibration loaded: direction=%ld, offset=%.6f rad, h2_a2=%.6f h2_b2=%.6f rad_elec, stored_v2=%u\r\n",
+                         (long)record.direction, (double)record.offset,
+                         (double)record.h2_cos_rad_elec,(double)record.h2_sin_rad_elec,(unsigned)saved);
   else printf("WARNING: no valid calibration for this motor; run 'cal start' manually. FOC blocked.\r\n");
+}
+void MotorCalibration_Stop(void)
+{
+  if (MotorCalibration_IsActive()) { MotorCalibration_TripISR("user stop"); Finish("aborted"); }
 }
 static void PrintStatus(void)
 {
+  printf("Calibration H2: a2=%.6f b2=%.6f rad_elec; candidate_valid=%u, candidate_a2=%.6f candidate_b2=%.6f\r\n",
+    calibrated ? (double)record.h2_cos_rad_elec : 0.0,
+    calibrated ? (double)record.h2_sin_rad_elec : 0.0,
+    (unsigned)map_candidate_valid,
+    map_candidate_valid ? (double)map_candidate_a2 : 0.0,
+    map_candidate_valid ? (double)map_candidate_b2 : 0.0);
   printf("Calibration: %s, stage=%u, stored=%s, direction=%ld, offset=%.6f rad, fault=%s\r\n",
     calibrated ? "VALID" : "UNCALIBRATED", (unsigned)stage, saved ? "yes" : "no",
     calibrated ? (long)record.direction : 0L, calibrated ? (double)record.offset : 0.0,
     fault ? fault : "none");
+  if (operation == CAL_OP_MAP) {
+    static const char *const names[] = { "MAP_CHECK_STILL", "MAP_RAMP", "MAP_HOLD_START",
+      "MAP_FORWARD", "MAP_HOLD_END", "MAP_BACKWARD", "MAP_HOLD_RETURN" };
+    unsigned pass = stage >= MAP_BACKWARD ? 1U : 0U;
+    printf("Calibration operation=map, stage=%s, samples=%u/%u\r\n",
+      names[stage-MAP_CHECK_STILL], map_stats[pass].count, MOTOR_CONTROL_CAL_MAP_POINTS);
+  }
 }
 /* 往復移動量を検証してからoffsetを求める。通電処理から独立させて検査可能にする。 */
 static bool Solve(float first, float far, float returned, CalibrationRecord *result)
@@ -177,6 +237,19 @@ static void SelfTest(void)
   if (Solve(1,1+0.5f*TWO_PI/MOTOR_CONTROL_POLE_PAIRS,1,&bad)) failures++; /* 極対数違い */
   if (Solve(1,1+TWO_PI/MOTOR_CONTROL_POLE_PAIRS,1.2f,&bad)) failures++; /* 戻り不良 */
   if (Solve(NAN,1,1,&bad)) failures++;
+  MapStats stats[2] = {0};
+  MapAccumulate(&stats[0], PI-0.01f); MapAccumulate(&stats[0], -PI+0.01f);
+  checks++; if (fabsf(fabsf(MapMean(&stats[0]))-PI) > 0.0001f) failures++;
+  for (int order=-1; order<=1; order+=2) {
+    checks++; if (!MapTravelValid((float)order*TWO_PI,order)) failures++;
+    checks++; if (MapTravelValid((float)order*(TWO_PI-TWO_PI/MOTOR_CONTROL_POLE_PAIRS),order)) failures++;
+    checks++; if (MapTravelValid(-(float)order*TWO_PI,order)) failures++;
+  }
+  CalibrationRecord before = good;
+  memset(stats,0,sizeof(stats));
+  MapAccumulate(&stats[0],0.2f); MapAccumulate(&stats[1],0.2f);
+  checks++; if (fabsf(SignedAngle(MapCandidate(&good,stats)-good.offset)-0.2f)>0.0001f) failures++;
+  checks++; if (memcmp(&good,&before,sizeof(good)) != 0) failures++;
   printf("Calibration selftest: %u checks, %u failures (no PWM/Flash writes)\r\n",checks,failures);
 }
 bool MotorCalibration_ProcessCommand(const char *command)
@@ -192,7 +265,7 @@ bool MotorCalibration_ProcessCommand(const char *command)
       printf("Selftest requires stopped PWM and ADC\r\n");
     else SelfTest();
   } else if (Same(arg,"stop")) {
-    if (MotorCalibration_IsActive()) { MotorCalibration_TripISR("user stop"); Finish("aborted"); }
+    MotorCalibration_Stop();
   } else if (Same(arg,"save")) {
     if (!calibrated || MotorCalibration_IsActive() || !MotorControl_IsStopped() || CurrentSense_IsBusy()) {
       printf("Save requires successful calibration and stopped PWM/ADC log\r\n"); return true;
@@ -203,6 +276,25 @@ bool MotorCalibration_ProcessCommand(const char *command)
     saved = CalibrationStore_Save(&record);
     AS5047P_Resume();
     printf("Calibration flash %s\r\n", saved ? "saved and verified" : "FAILED; RAM result only");
+  } else if (Same(arg,"map apply")) {
+    if (FocVoltage_IsActive() || MotorCalibration_IsActive() ||
+        !MotorControl_IsStopped() || CurrentSense_IsBusy()) {
+      printf("Map apply requires stopped FOC/PWM/calibration/ADC log\r\n"); return true;
+    }
+    if (!calibrated || !map_candidate_valid ||
+        memcmp(&record,&map_source,sizeof(record))!=0) {
+      printf("Map apply requires a valid candidate for the current calibration\r\n"); return true;
+    }
+    CalibrationRecord next=record;
+    CalibrationStore_SetH2(&next,map_candidate_a2,map_candidate_b2);
+    if (!CalibrationStore_Valid(&next)) {
+      printf("Map apply rejected: invalid H2 coefficients\r\n"); return true;
+    }
+    record=next; saved=false; map_candidate_valid=false;
+    printf("Map H2 applied (RAM): a2=%.6f b2=%.6f rad_elec; send cal save\r\n",
+        (double)record.h2_cos_rad_elec,(double)record.h2_sin_rad_elec);
+  } else if (Same(arg,"map")) {
+    StartMap();
   } else if (Same(arg,"start")) {
     if (MotorCalibration_IsActive() || !MotorControl_IsStopped() || CurrentSense_IsBusy()) {
       printf("Send stop and adc stop, wait for idle, then cal start\r\n"); return true;
@@ -224,16 +316,201 @@ bool MotorCalibration_ProcessCommand(const char *command)
       printf("Calibration blocked: invalid config\r\n"); return true;
     }
     /* 新しい校正の途中で失敗したら、古いRAM結果に戻して運転を許可しない。 */
+    map_candidate_valid=false;
     calibrated = false; saved = false; fault = NULL; energized = false;
     trip_captured = false; peak_current = requested_voltage = 0.0f;
     for (unsigned i=0; i<4; i++) observed_current[i] = 0.0f;
     previous_angle = position = sample.mechanical_rad; sequence = sample.sequence;
     task_ms = HAL_GetTick(); heartbeat = task_ms;
-    Enter(CHECK_STILL, task_ms);
+    operation = CAL_OP_NORMAL; Enter(CHECK_STILL, task_ms);
     printf("Manual calibration started: free rotor required, max %.2f V / %.2f A; stop aborts\r\n",
            (double)MOTOR_CONTROL_CAL_VOLTAGE, (double)MOTOR_CONTROL_CAL_CURRENT_LIMIT_A);
-  } else printf("Usage: cal start | cal status | cal stop | cal save | cal test\r\n");
+  } else printf("Usage: cal start | cal map | cal map apply | cal status | cal stop | cal save | cal test\r\n");
   return true;
+}
+static void StartMap(void)
+{
+  map_candidate_valid=false;
+  if (!calibrated || !CalibrationStore_Valid(&record)) {
+    printf("Cal map requires valid calibration; run cal start first\r\n"); return;
+  }
+  if (FocVoltage_IsActive() || MotorCalibration_IsActive() || !MotorControl_IsStopped() || CurrentSense_IsBusy()) {
+    printf("Send stop and adc stop, wait for idle, then cal map\r\n"); return;
+  }
+  AS5047P_Sample sample; BusVoltageSample vm;
+  if (!AS5047P_GetSample(&sample) || !BusVoltage_GetSample(&vm) || vm.overvoltage ||
+      !isfinite(sample.mechanical_rad) || !isfinite(vm.volts) ||
+      vm.volts < MOTOR_CONTROL_VM_MIN_VOLTS || vm.volts > MOTOR_CONTROL_VM_MAX_VOLTS) {
+    printf("Cal map blocked: invalid encoder or VM\r\n"); return;
+  }
+  if (MOTOR_CONTROL_POLE_PAIRS == 0U || MOTOR_CONTROL_CAL_MAP_POINTS < 2U ||
+      MOTOR_CONTROL_CAL_MAP_SWEEP_MS == 0U || MOTOR_CONTROL_CAL_RAMP_MS == 0U ||
+      MOTOR_CONTROL_CAL_HOLD_MS < 300U ||
+      !isfinite(MOTOR_CONTROL_CAL_MAP_VOLTAGE) || MOTOR_CONTROL_CAL_MAP_VOLTAGE <= 0.0f ||
+      !isfinite(MOTOR_CONTROL_VOLTAGE_LIMIT) || MOTOR_CONTROL_VOLTAGE_LIMIT <= 0.0f ||
+      MOTOR_CONTROL_CAL_MAP_VOLTAGE > MOTOR_CONTROL_VOLTAGE_LIMIT ||
+      !isfinite(MOTOR_CONTROL_CAL_MAP_CURRENT_LIMIT_A) || MOTOR_CONTROL_CAL_MAP_CURRENT_LIMIT_A <= 0.0f ||
+      !isfinite(MOTOR_CONTROL_PWM_MARGIN) || MOTOR_CONTROL_PWM_MARGIN < 0.05f || MOTOR_CONTROL_PWM_MARGIN >= 0.5f ||
+      !isfinite(MOTOR_CONTROL_CAL_MAP_TRAVEL_TOLERANCE) || MOTOR_CONTROL_CAL_MAP_TRAVEL_TOLERANCE <= 0.0f ||
+      MOTOR_CONTROL_CAL_MAP_TRAVEL_TOLERANCE >= 1.0f/MOTOR_CONTROL_POLE_PAIRS) {
+    printf("Cal map blocked: invalid config\r\n"); return;
+  }
+  /* record/calibrated/savedには触れない。中断時も元の校正を維持する。 */
+  fault = NULL; energized = false; trip_captured = false;
+  peak_current = requested_voltage = 0.0f;
+  memset(map_stats,0,sizeof(map_stats));
+  memset(map_fit,0,sizeof(map_fit));
+  map_source=record;
+  for (unsigned i=0; i<4; i++) observed_current[i] = 0.0f;
+  previous_angle = position = map_origin_position = sample.mechanical_rad;
+  map_base = VoltageVector_Wrap((float)record.direction*MOTOR_CONTROL_POLE_PAIRS*sample.mechanical_rad-record.offset);
+  map_forward_travel = 0.0f; sequence = sample.sequence;
+  map_command_delta = map_command_progress = 0.0f;
+  task_ms = heartbeat = HAL_GetTick(); operation = CAL_OP_MAP;
+  Enter(MAP_CHECK_STILL,task_ms);
+  printf("CALMAP_BEGIN,points=%u,pole_pairs=%u,sweep_ms=%lu,voltage=%.3f,direction=%ld,offset=%.6f\r\n",
+    MOTOR_CONTROL_CAL_MAP_POINTS, MOTOR_CONTROL_POLE_PAIRS, (unsigned long)MOTOR_CONTROL_CAL_MAP_SWEEP_MS,
+    (double)MOTOR_CONTROL_CAL_MAP_VOLTAGE, (long)record.direction, (double)record.offset);
+  printf("CALMAP_HEADER,pass,index,elapsed_ms,cmd_delta_e_rad,cmd_elec_rad,mech_raw_rad,mech_unwrapped_rad,error_e_rad,U1_A,V_A,U2_A,W_A\r\n");
+}
+static void MapSummary(float return_error)
+{
+  float forward = MapMean(&map_stats[0]), reverse = MapMean(&map_stats[1]);
+  float combined = atan2f(map_stats[0].sum_sin+map_stats[1].sum_sin,
+                         map_stats[0].sum_cos+map_stats[1].sum_cos);
+  float candidate = MapCandidate(&record,map_stats);
+  /* 大きなサマリの整形・送信より先にPWM/ADCを停止する。 */
+  Finish(fault ? fault : "map complete (diagnostic only)");
+  if (fault) return; /* 最終判定と停止の間に起きたISR異常も成功扱いしない。 */
+  H2FitResult fitted[2];
+  if (map_fit[0].count!=MOTOR_CONTROL_CAL_MAP_POINTS ||
+      map_fit[1].count!=MOTOR_CONTROL_CAL_MAP_POINTS ||
+      !H2Fit_Solve(&map_fit[0],&fitted[0]) || !H2Fit_Solve(&map_fit[1],&fitted[1])) {
+    printf("CALMAP_H2_INVALID: insufficient/invalid samples, error wrap or singular fit; calibration unchanged\r\n");
+    return;
+  }
+  map_candidate_a2=0.5f*fitted[0].a+0.5f*fitted[1].a;
+  map_candidate_b2=0.5f*fitted[0].b+0.5f*fitted[1].b;
+  CalibrationRecord next=record;
+  CalibrationStore_SetH2(&next,map_candidate_a2,map_candidate_b2);
+  map_candidate_valid=CalibrationStore_Valid(&next);
+  if (!map_candidate_valid) {
+    printf("CALMAP_H2_INVALID: invalid average; calibration unchanged\r\n"); return;
+  }
+  printf("CALMAP_SUMMARY\r\nsamples_forward=%u\r\nsamples_reverse=%u\r\nforward_travel=%.6f\r\nreturn_error_e=%.6f\r\n",
+    map_stats[0].count,map_stats[1].count,(double)map_forward_travel,(double)return_error);
+  printf("mean_error_forward=%.6f\r\nmean_error_reverse=%.6f\r\nmean_error_combined=%.6f\r\nbidirectional_difference=%.6f\r\n",
+    (double)forward,(double)reverse,(double)combined,(double)SignedAngle(forward-reverse));
+  for (unsigned i=0;i<2;i++) {
+    float amplitude=hypotf(fitted[i].a,fitted[i].b);
+    printf("H2_%c: c=%.6f a=%.6f b=%.6f amplitude=%.6f rad_elec; A*cos(2*theta_m-phase)\r\n",
+        i ? 'R' : 'F',(double)fitted[i].c,(double)fitted[i].a,(double)fitted[i].b,(double)amplitude);
+    if (amplitude==0.0f) printf("H2_%c: phase=undefined (zero amplitude)\r\n",i ? 'R' : 'F');
+    else {
+      float phase=atan2f(fitted[i].b,fitted[i].a);
+      printf("H2_%c: phase=%.6f rad (%.6f deg)\r\n",i ? 'R' : 'F',(double)phase,(double)(phase*180.0f/PI));
+    }
+  }
+  printf("candidate_h2_cos_rad_elec=%.6f\r\ncandidate_h2_sin_rad_elec=%.6f\r\nH2 candidate only; send cal map apply, then cal save\r\n",
+      (double)map_candidate_a2,(double)map_candidate_b2);
+  printf("resultant_forward=%.6f\r\nresultant_reverse=%.6f\r\ncandidate_offset=%.6f\r\nold_offset=%.6f\r\npeak_current=%.3f\r\nCALMAP_END\r\n",
+    (double)(hypotf(map_stats[0].sum_sin,map_stats[0].sum_cos)/(float)map_stats[0].count),
+    (double)(hypotf(map_stats[1].sum_sin,map_stats[1].sum_cos)/(float)map_stats[1].count),
+    (double)candidate,(double)record.offset,(double)peak_current);
+}
+static void MapTask(uint32_t now, const AS5047P_Sample *sample, bool fresh, float vm)
+{
+  if (!isfinite(sample->mechanical_rad) || !isfinite(vm) || vm > MOTOR_CONTROL_VM_MAX_VOLTS) {
+    MotorCalibration_TripISR("invalid encoder or VM"); Finish(fault); return;
+  }
+  uint32_t elapsed = now-stage_ms;
+  float delta_e = 0.0f, volts = MOTOR_CONTROL_CAL_MAP_VOLTAGE;
+  bool holding = stage == MAP_CHECK_STILL || stage == MAP_HOLD_START ||
+                 stage == MAP_HOLD_END || stage == MAP_HOLD_RETURN;
+  /* 通常校正と同じ最後200msの静止判定。機械角は共通Taskでunwrap済み。 */
+  if (holding && fresh && elapsed + 200U >= MOTOR_CONTROL_CAL_HOLD_MS) {
+    sum += position; count++;
+    minimum = fminf(minimum,position); maximum = fmaxf(maximum,position);
+  }
+  if (holding && elapsed >= MOTOR_CONTROL_CAL_HOLD_MS) {
+    if (count < 20U || (maximum-minimum)*MOTOR_CONTROL_POLE_PAIRS > MOTOR_CONTROL_CAL_POSITION_TOLERANCE_RAD) {
+      MotorCalibration_TripISR("rotor not settled"); Finish(fault); return;
+    }
+    float mean = sum/(float)count;
+    if (stage == MAP_CHECK_STILL) {
+      if (MotorControl_StartVoltage() != HAL_OK) { Finish("PWM start failed"); return; }
+      current_ms = heartbeat = HAL_GetTick();
+      if (CurrentSense_BeginControl() != HAL_OK) { Finish("ADC start failed"); return; }
+      energized = true; Enter(MAP_RAMP,HAL_GetTick()); return;
+    } else if (stage == MAP_HOLD_START) {
+      map_command_progress = 0.0f;
+      Enter(MAP_FORWARD,now);
+    } else if (stage == MAP_HOLD_END) {
+      if (!MapTravelValid(mean-map_origin_position,record.direction)) {
+        MotorCalibration_TripISR("map settled travel mismatch"); Finish(fault); return;
+      }
+      map_command_progress = 0.0f; Enter(MAP_BACKWARD,now);
+    } else {
+      /* wrapすると1電気回転分の脱調を隠すので、戻り量は非wrapのまま検証。 */
+      float return_error = (float)record.direction*MOTOR_CONTROL_POLE_PAIRS*(mean-map_origin_position);
+      if (fabsf(return_error) > MOTOR_CONTROL_CAL_POSITION_TOLERANCE_RAD) {
+        MotorCalibration_TripISR("map return position mismatch"); Finish(fault); return;
+      }
+      MapSummary(return_error); return;
+    }
+    elapsed = 0U;
+  }
+  if (stage == MAP_CHECK_STILL) return;
+  if (stage == MAP_RAMP) {
+    volts *= fminf(1.0f,(float)elapsed/MOTOR_CONTROL_CAL_RAMP_MS);
+    if (elapsed >= MOTOR_CONTROL_CAL_RAMP_MS) Enter(MAP_HOLD_START,now);
+  } else if (stage == MAP_HOLD_END) delta_e = TWO_PI*MOTOR_CONTROL_POLE_PAIRS;
+  else if (stage == MAP_FORWARD || stage == MAP_BACKWARD) {
+    unsigned pass = stage == MAP_FORWARD ? 0U : 1U;
+    MapStats *stats = &map_stats[pass];
+    float progress = fminf(1.0f,(float)elapsed/MOTOR_CONTROL_CAL_MAP_SWEEP_MS);
+    delta_e = TWO_PI*MOTOR_CONTROL_POLE_PAIRS*(pass ? 1.0f-progress : progress);
+    float target = (float)stats->count/(MOTOR_CONTROL_CAL_MAP_POINTS-1U);
+    /* 1回のTaskで1点のみ。同じencoder sampleによる穴埋めは行わない。 */
+    if (fresh && stats->count < MOTOR_CONTROL_CAL_MAP_POINTS && map_command_progress >= target) {
+      if (stats->count+1U < MOTOR_CONTROL_CAL_MAP_POINTS &&
+          map_command_progress >= (float)(stats->count+1U)/(MOTOR_CONTROL_CAL_MAP_POINTS-1U)) {
+        MotorCalibration_TripISR("map sample target missed"); Finish(fault); return;
+      }
+      /* 今取得した角度は直前まで印加していた指令と比較する。
+       * このTask末尾で更新する未来の指令との差を誤差に混ぜない。 */
+      float command = VoltageVector_Wrap(map_base+map_command_delta);
+      float measured = VoltageVector_Wrap((float)record.direction*MOTOR_CONTROL_POLE_PAIRS*sample->mechanical_rad-record.offset);
+      float error = SignedAngle(measured-command), currents[4];
+      uint32_t mask = __get_PRIMASK(); __disable_irq();
+      for (unsigned i=0; i<4; i++) currents[i] = observed_current[i];
+      __set_PRIMASK(mask);
+      printf("CALMAP,%c,%u,%lu,%.6f,%.6f,%.6f,%.6f,%.6f,%.3f,%.3f,%.3f,%.3f\r\n",
+        pass ? 'R' : 'F',stats->count,(unsigned long)elapsed,(double)map_command_delta,(double)command,
+        (double)sample->mechanical_rad,(double)position,(double)error,
+        (double)currents[0],(double)currents[1],(double)currents[2],(double)currents[3]);
+      MapAccumulate(stats,error);
+      H2Fit_Add(&map_fit[pass],sample->mechanical_rad,error);
+    }
+    map_command_progress = progress;
+    if (elapsed >= MOTOR_CONTROL_CAL_MAP_SWEEP_MS) {
+      if (stats->count == MOTOR_CONTROL_CAL_MAP_POINTS) {
+        if (!pass) {
+          map_forward_travel = position-map_origin_position;
+          if (!MapTravelValid(map_forward_travel,record.direction)) {
+            MotorCalibration_TripISR("map travel/direction mismatch"); Finish(fault); return;
+          }
+        }
+        Enter(pass ? MAP_HOLD_RETURN : MAP_HOLD_END,now);
+      } else if (elapsed > MOTOR_CONTROL_CAL_MAP_SWEEP_MS+MOTOR_CONTROL_ENCODER_STALE_MS) {
+        MotorCalibration_TripISR("map sample count mismatch"); Finish(fault); return;
+      }
+    }
+  }
+  requested_voltage = volts;
+  if (!MotorControl_SetVoltage(VoltageVector_Wrap(map_base+delta_e),volts,0.0f,vm)) {
+    MotorCalibration_TripISR("voltage output rejected"); Finish(fault);
+  } else map_command_delta = delta_e;
 }
 void MotorCalibration_Task(void)
 {
@@ -257,6 +534,7 @@ void MotorCalibration_Task(void)
     if (delta < -PI) delta += TWO_PI;
     position += delta; previous_angle = sample.mechanical_rad; sequence = sample.sequence;
   }
+  if (operation == CAL_OP_MAP) { MapTask(now,&sample,fresh,vm.volts); return; }
   uint32_t elapsed = now-stage_ms;
   float angle = 0.0f, volts = MOTOR_CONTROL_CAL_VOLTAGE;
   bool holding = stage == CHECK_STILL || stage == HOLD_ZERO || stage == HOLD_END || stage == HOLD_RETURN || stage == HOLD_APPROACH;

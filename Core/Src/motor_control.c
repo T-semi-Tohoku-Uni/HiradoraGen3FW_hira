@@ -785,7 +785,7 @@ bool MotorControl_ProcessCommand(const char *command)
 
   if (MotorControl_IsCommand(command, "stop"))
   {
-    MotorCalibration_TripISR("user stop");
+    MotorCalibration_Stop();
     FocVoltage_TripISR("user stop");
     MotorControl_Stop();
     printf("PWM stopped\r\n");
@@ -899,7 +899,7 @@ bool MotorControl_ProcessStopCommand(const char *command)
     return false;
   }
 
-  MotorCalibration_TripISR("user stop");
+  MotorCalibration_Stop();
   FocVoltage_TripISR("user stop");
   MotorControl_Stop();
   printf("PWM stopped\r\n");
@@ -972,6 +972,10 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 /* 電圧モードでは既存のbootstrap/FAULT確認を再利用する。 */
 bool MotorControl_IsStopped(void) { return !outputs_enabled; }
 bool MotorControl_IsVoltageMode(void) { return motor_mode == MOTOR_CONTROL_MODE_VOLTAGE; }
+float MotorControl_GetPeriodSeconds(void)
+{
+  return control_tick_hz ? 1.0f / (float)control_tick_hz : 0.0f;
+}
 HAL_StatusTypeDef MotorControl_StartVoltage(void)
 {
   if (!MotorControl_IsStopped()) return HAL_BUSY;

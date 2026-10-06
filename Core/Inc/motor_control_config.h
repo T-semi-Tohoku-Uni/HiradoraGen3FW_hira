@@ -16,12 +16,12 @@
 /* 定格不明のため、以下は実験用保護値。KVから許容電流は推定しない。
  * CURRENT_LIMIT_AはFOC通常運転用。校正にはCAL_CURRENT_LIMIT_Aを使う。
  * いずれも電流指令値ではなく、超過時に出力を停止する閾値。 */
-#define MOTOR_CONTROL_CURRENT_LIMIT_A              10.0f
-#define MOTOR_CONTROL_CAL_CURRENT_LIMIT_A          10.0f
+#define MOTOR_CONTROL_CURRENT_LIMIT_A              20.0f
+#define MOTOR_CONTROL_CAL_CURRENT_LIMIT_A          15.0f
 /* N5065実測：1V/10Aで7回完走、最大約8.41A。通常運転用閾値とは独立。 */
 #define MOTOR_CONTROL_CAL_VOLTAGE                   1.0f
 #define MOTOR_CONTROL_VM_MIN_VOLTS                 6.0f
-#define MOTOR_CONTROL_VOLTAGE_LIMIT                 3.0f
+#define MOTOR_CONTROL_VOLTAGE_LIMIT                 8.0f
 #define MOTOR_CONTROL_PWM_MARGIN                   0.05f
 #define MOTOR_CONTROL_CAL_RAMP_MS                  500U
 #define MOTOR_CONTROL_CAL_HOLD_MS                  700U
@@ -29,6 +29,13 @@
 #define MOTOR_CONTROL_CAL_MOTION_TOLERANCE          0.20f
 #define MOTOR_CONTROL_CAL_POSITION_TOLERANCE_RAD    0.15f
 #define MOTOR_CONTROL_CAL_WATCHDOG_MS               20U
+
+/* 機械1回転の診断専用。既存校正値は変更せず、低電圧で長時間走査する。 */
+#define MOTOR_CONTROL_CAL_MAP_VOLTAGE               0.8f
+#define MOTOR_CONTROL_CAL_MAP_CURRENT_LIMIT_A       10.0f
+#define MOTOR_CONTROL_CAL_MAP_POINTS                1000U
+#define MOTOR_CONTROL_CAL_MAP_SWEEP_MS              (MOTOR_CONTROL_CAL_SWEEP_MS * MOTOR_CONTROL_POLE_PAIRS)
+#define MOTOR_CONTROL_CAL_MAP_TRAVEL_TOLERANCE      0.05f
 
 /* dq電圧一定FOCの実験用。通常運転の保護にはCURRENT_LIMIT_Aを使う。 */
 #define MOTOR_CONTROL_FOC_MAX_VOLTS                 1.0f
@@ -42,6 +49,20 @@
  * dq観測だけを反転する。raw相電流ログ・絶対値の過電流保護は変更しない。
  * 電流の絶対精度、サンプル時刻の影響は別途検証が必要。 */
 #define MOTOR_CONTROL_FOC_CURRENT_POLARITY         -1.0f
+
+/* 電流PI。2026-10-05: 現在の負荷で正方向3～14Aの短時間試験で調整。
+ * Kp [V/A], Ki [V/(A*s)]。追加比較: docs/current_pi_sweep_2026-10-05.md。
+ * 指令上限は相電流の過電流停止閾値とは別。積分項の単位はV。
+ * CURRENT_REF_MAX_A < CURRENT_LIMIT_A が必須（同値は設定エラー）。 */
+#define MOTOR_CONTROL_CURRENT_KP_D                  0.6f
+#define MOTOR_CONTROL_CURRENT_KI_D                  120.0f
+#define MOTOR_CONTROL_CURRENT_KP_Q                  0.6f
+#define MOTOR_CONTROL_CURRENT_KI_Q                  120.0f
+#define MOTOR_CONTROL_CURRENT_INTEGRAL_LIMIT_D      15.0f
+#define MOTOR_CONTROL_CURRENT_INTEGRAL_LIMIT_Q      15.0f
+#define MOTOR_CONTROL_CURRENT_REF_MAX_A             15.0f
+#define MOTOR_CONTROL_CURRENT_SLEW_A_PER_SEC         60.0f
+#define MOTOR_CONTROL_CURRENT_MAX_VOLTS             5.0f
 
 /* Charge all three bootstrap capacitors before each PWM start. */
 #define MOTOR_CONTROL_BOOTSTRAP_CHARGE_US           750U

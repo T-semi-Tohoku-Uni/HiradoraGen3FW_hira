@@ -19,7 +19,7 @@ FOCの基盤として、dq電圧からのPWM生成・手動エンコーダー校
 設定値と校正の操作手順は[シリアルコマンド一覧](docs/serial_commands.md)を参照してください。
 dq電圧一定FOCを追加しました。`foc voltage 0 0.05`で指令を設定し、
 静止・校正済みを確認して`foc start`で開始します。`foc status`で電流と処理時間を表示します。
-`stop`で全出力OFF。`adc stop`後も電流監視は継続します。電流PI制御は未実装です。
+`stop`で全出力OFF。`adc stop`後も電流監視は継続します。電流PIも使用できます。操作と暫定ゲインは[電流PI](docs/current_pi.md)を参照してください。
 FOC追加版はRelease/Debugビルド確認済み。Releaseで±0.4 Vの正逆回転、停止、100 HzのADCログを確認しました。
 [実機確認結果と残課題](docs/foc_voltage_test_2026-09-24.md)を参照してください。
 
@@ -46,3 +46,6 @@ FOC中のADCログにId・Iq・dq変換で使用した電気角を追加しま�
 
 ADC周期で取得した同じ角度をdq変換と電圧計算で共用し、角度とのソフトウェア時刻差をログへ追加しました。
 [時刻対応の変更と正逆200 Hz試験](docs/timing_alignment_2026-09-25.md)を参照してください。
+
+エンコーダーのCSガードと角度公開処理を見直し、Debugの周期処理経路も最適化しました。
+[2026-09-28の時間余裕改善](docs/encoder_margin_2026-09-28.md)：正逆200 HzログはRelease/Debugとも欠落0、角度ageの中央値は23～24 µsです。
