@@ -56,7 +56,7 @@ def inspect(path, enabled):
     end=min(29,summary['adc_last_s']-.05)
     summary['h2_enabled']=enabled
     summary['h2_steady']=window(2,end)
-    summary['h2_windows']=[window(lo,hi) for lo,hi in [(2,10),(10,20),(20,end)] if hi>lo]
+    summary['h2_windows']=[window(lo,min(hi,end)) for lo,hi in [(2,10),(10,20),(20,end)] if min(hi,end)-lo>1.1]
     assert summary['h2_steady']['correction_error_max']<0.0007
     assert summary['h2_steady']['wrap_error_max']<0.0016
     return summary

@@ -9,7 +9,7 @@ from pathlib import Path
 
 def analyze(path):
     text = Path(path).read_text(encoding='utf-8-sig')
-    target = float(re.search(r'# COMMAND foc current 0 ([\d.]+)', text)[1])
+    target = float(re.search(r'# COMMAND foc current 0 (-?[\d.]+)', text)[1])
     # Host markers can fall between two fragments of one UART line. Remove
     # the inserted marker and its newline without adding a separator.
     clean = re.sub(r'# (?:COMMAND [^\r\n]*|STOP_REQUEST [^\r\n]*)\r?\n', '', text)
