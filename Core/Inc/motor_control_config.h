@@ -4,12 +4,6 @@
 /* Motor and open-loop six-step parameters. */
 #define MOTOR_CONTROL_POLE_PAIRS                    7U
 
-/* FOC electrical error: 0.0750*cos(2*theta_m - 2.327) [rad_elec].
- * Already in the FOC frame: do not multiply by pole pairs or direction.
- * gain=+1 subtracts this error; -1 reverses it. Runtime default is OFF. */
-#define MOTOR_CONTROL_ENCODER_H2_AMPLITUDE_ELEC_RAD  0.0750f
-#define MOTOR_CONTROL_ENCODER_H2_PHASE_RAD           -2.327f
-
 /* 角度通信の締切と鮮度。TIM1停止中はmainから低頻度取得する。 */
 #define MOTOR_CONTROL_ENCODER_TIMEOUT_US            100U
 #define MOTOR_CONTROL_ENCODER_STALE_MS              10U

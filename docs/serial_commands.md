@@ -4,7 +4,8 @@
 
 `foc h2 on` / `foc h2 off`、`foc h2 gain 0` / `+1` / `-1`、`foc h2 status`で操作します。
 起動時OFF、gain=+1。運転・ADCログ中も変更可能です。
-電気角誤差`0.0750*cos(2*theta_m - 2.327)` [rad_elec]をgain=+1で減算します。
+`cal map`→`cal map apply`→`cal save`で係数を取得・適用・保存します。
+電気角誤差`a2*cos(2*theta_m)+b2*sin(2*theta_m)` [rad_elec]をgain=+1で減算します。
 raw角度を保持し、FOC使用角だけに適用します。[式・ログ・試験手順](encoder_h2.md)を参照してください。
 
 ## 母線電圧VM
@@ -192,12 +193,13 @@ Vd/Vqシリアル運転は下記のFOCコマンドで行います。
 |---|---|
 | `cal start` | 停止中のみ、相順と電気角offsetを手動校正 |
 | `cal map` | 校正済み・停止中のみ、機械1回転の往復角度誤差をCSV出力。校正値は変更しない |
-| `cal status` | 校正有効性、段階、保存状態、相順、offset、停止理由 |
+| `cal map apply` | 停止中のみ、正常mapの候補a2/b2をRAM適用。direction/offsetは維持 |
+| `cal status` | 校正有効性、段階、保存状態、相順、offset、H2現在値・候補、停止理由 |
 | `cal stop` / `stop` | 校正を中止し全PWM出力を停止 |
 | `cal save` | 成功したRAM校正値をFlashへ保存・読み戻し検証（PWM/ADC停止中のみ） |
-| `cal test` | 停止中に既存586項目＋map演算9項目（計595項目）を実行。通電・Flash書き込みなし |
+| `cal test` | 停止中にCRC対象拡張を含む計659項目を実行。通電・Flash書き込みなし |
 
-### `cal map`: 機械1回転の誤差測定（診断専用）
+### `cal map`: 機械1回転の誤差測定とH2候補計算
 
 有効な校正値（RAMまたは起動時に読み込んだFlash値）が必要です。
 未校正なら先に`cal start`を実行してください。PWM停止・ADCログidle・有効で新鮮な
@@ -213,9 +215,9 @@ cal map
 ```
 
 ADCログの終了を待ってから`cal map`を送ります。map専用設定は長時間通電を考慮した
-Vd=0.4 V、Vq=0 V、相過電流停止5 Aです。現在角度に対応した電気角で500 ms rampし、
+Vd=0.8 V、Vq=0 V、相過電流停止10 Aです。現在角度に対応した電気角で500 ms rampし、
 各方向28秒で走査します（4000 ms × 7極対）。静止確認と保持を含む全体は約59秒です。
-通常の`cal start`は従来どおり1 V / 10 Aです。
+通常の`cal start`は1 V / 15 Aです。
 
 状態遷移は`MAP_CHECK_STILL → MAP_RAMP → MAP_HOLD_START → MAP_FORWARD →
 MAP_HOLD_END → MAP_BACKWARD → MAP_HOLD_RETURN → PWM OFF`です。
@@ -251,8 +253,10 @@ resultant = hypot(sum(sin(error_e)), sum(cos(error_e))) / count
 正常終了時のみ`CALMAP_SUMMARY`～`CALMAP_END`を出力します。
 
 `candidate_offset`は表示だけです。成功・失敗・中止のいずれでも既存record、VALID、
-保存状態、Flashを変更しません。map後の`cal save`も従来の校正値を保存します。
-補正LUT・FOC中の補正・OTP書込みは実装していません。
+保存状態、Flashを変更しません。H2係数はF/R別に定数項付き最小二乗で求め、平均を候補表示します。
+`cal map apply`が候補a2/b2をRAMに適用し、`cal save`が適用中の校正値全体を保存します。
+apply前のsaveは現在値を保存します。候補を自動採用しません。
+[2/rev補正の式・位相定義・Flash互換性](encoder_h2.md)を参照してください。補正LUT・OTP書込みはありません。
 
 `stop` / `cal stop`で即時にPWM停止・ADC制御終了できます。動作中も過電流、ADC飽和・
 更新停止、VM上下限・有効性、encoder有効性・鮮度、nFAULT、main watchdogを監視します。
@@ -338,7 +342,8 @@ UART errors/overrunとADCログoverrunは0でした。監視継続の確認で�
 ユーザー管理の`STM32G431xx_CAL_FLASH.ld`でプログラムを126 KiBに制限し、
 最終ページ`0x0801F800..0x0801FFFF`（2 KiB）を予約します。CubeMX生成リンカは変更していません。
 CMakeが予約版を選択します。別IDEのビルドでもこのリンカを使用してください。
-32バイトのレコードに版番号・モーターID・極対数・KV・相順・offset・magic・CRC32を格納します。
+version 2の40バイトのレコードに版番号・モーターID・極対数・KV・相順・offset・H2係数a2/b2・magic・CRC32を格納します。
+旧version 1（32バイト）は検証後、H2係数ゼロとしてRAMへ移行します。Flashの新形式への保存は`cal save`で行います。
 HALで1ページを消去し、magic/CRCを含む最後のdoublewordまで書いた後、読み戻して検証します。
 単一ページなので保存中の電断では旧値も失われ得ます。その場合は警告後、手動再校正が必要です。
 未保存の再校正結果は再起動で失われ、以前保存済みの値があればそれを読みます。

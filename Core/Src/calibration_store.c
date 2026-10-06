@@ -9,7 +9,16 @@
 /* 最終2KiBをリンカで予約。アドレスをリンク定義と二重に固定しない。 */
 extern const uint8_t __calibration_start__[];
 #define CAL_MAGIC 0x43414C31U
-_Static_assert(sizeof(CalibrationRecord) == 32U, "Flash record layout");
+_Static_assert(sizeof(CalibrationRecord) == 40U, "Flash record layout");
+_Static_assert(offsetof(CalibrationRecord, magic) == 32U, "Commit doubleword last");
+typedef struct {
+  uint32_t version, motor_id, pole_pairs;
+  float kv;
+  int32_t direction;
+  float offset;
+  uint32_t magic, crc;
+} CalibrationRecordV1;
+_Static_assert(sizeof(CalibrationRecordV1) == 32U, "Legacy Flash layout");
 _Static_assert(FLASH_PAGE_SIZE == 2048U, "Requires STM32G431 2KiB pages");
 static uint32_t Crc(const void *data, size_t length)
 {
@@ -23,23 +32,49 @@ static uint32_t Crc(const void *data, size_t length)
 }
 void CalibrationStore_Make(CalibrationRecord *r, int32_t direction, float offset)
 {
-  *r = (CalibrationRecord){1U, MOTOR_CONTROL_MOTOR_ID, MOTOR_CONTROL_POLE_PAIRS,
-      MOTOR_CONTROL_KV_RPM_PER_VOLT, direction, offset, CAL_MAGIC, 0U};
+  *r = (CalibrationRecord){2U, MOTOR_CONTROL_MOTOR_ID, MOTOR_CONTROL_POLE_PAIRS,
+      MOTOR_CONTROL_KV_RPM_PER_VOLT, direction, offset, 0.0f, 0.0f, CAL_MAGIC, 0U};
   r->crc = Crc(r, offsetof(CalibrationRecord, crc));
+}
+void CalibrationStore_SetH2(CalibrationRecord *r, float a2, float b2)
+{
+  r->h2_cos_rad_elec=a2; r->h2_sin_rad_elec=b2;
+  r->crc=Crc(r,offsetof(CalibrationRecord,crc));
 }
 bool CalibrationStore_Valid(const CalibrationRecord *r)
 {
-  return r && r->magic == CAL_MAGIC && r->version == 1U &&
+  return r && r->magic == CAL_MAGIC && r->version == 2U &&
     r->motor_id == MOTOR_CONTROL_MOTOR_ID && r->pole_pairs == MOTOR_CONTROL_POLE_PAIRS &&
     isfinite(r->kv) && r->kv == MOTOR_CONTROL_KV_RPM_PER_VOLT &&
     (r->direction == 1 || r->direction == -1) && isfinite(r->offset) &&
     r->offset >= 0.0f && r->offset < 6.2831853071795864769f &&
+    isfinite(r->h2_cos_rad_elec) && isfinite(r->h2_sin_rad_elec) &&
+    isfinite(hypotf(r->h2_cos_rad_elec,r->h2_sin_rad_elec)) &&
     r->crc == Crc(r, offsetof(CalibrationRecord, crc));
 }
 bool CalibrationStore_Load(CalibrationRecord *r)
 {
-  memcpy(r, __calibration_start__, sizeof(*r));
-  return CalibrationStore_Valid(r);
+  if (!r) return false;
+  CalibrationRecord loaded;
+  memcpy(&loaded, __calibration_start__, sizeof(loaded));
+  if (loaded.version==1U) {
+    CalibrationRecordV1 old;
+    memcpy(&old,__calibration_start__,sizeof(old));
+    if (old.magic!=CAL_MAGIC || old.crc!=Crc(&old,offsetof(CalibrationRecordV1,crc))) return false;
+    /* Keep legacy identity for validation; never relabel a different motor. */
+    loaded=(CalibrationRecord){2U,old.motor_id,old.pole_pairs,old.kv,
+        old.direction,old.offset,0.0f,0.0f,CAL_MAGIC,0U};
+    loaded.crc=Crc(&loaded,offsetof(CalibrationRecord,crc));
+  }
+  if (!CalibrationStore_Valid(&loaded)) return false;
+  *r=loaded;
+  return true;
+}
+bool CalibrationStore_IsCurrentFormat(void)
+{
+  uint32_t version;
+  memcpy(&version,__calibration_start__,sizeof(version));
+  return version==2U;
 }
 bool CalibrationStore_Save(const CalibrationRecord *r)
 {

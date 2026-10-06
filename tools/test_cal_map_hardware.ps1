@@ -33,7 +33,9 @@ function Cmd([string]$s,[int]$ms=200){$p.Write($s+"`n");return (Receive $ms)}
 function Identity([string]$text) {
   $m=[regex]::Match($text,'Calibration: VALID, stage=0, stored=(yes|no), direction=(-?1), offset=([0-9.]+) rad')
   if(!$m.Success){throw "Calibration not valid and idle: $text"}
-  return $m.Groups[1].Value+','+$m.Groups[2].Value+','+$m.Groups[3].Value
+  $h2=[regex]::Match($text,'Calibration H2: a2=([-0-9.]+) b2=([-0-9.]+) rad_elec;')
+  if(!$h2.Success){throw "H2 status missing: $text"}
+  return $m.Groups[1].Value+','+$m.Groups[2].Value+','+$m.Groups[3].Value+','+$h2.Groups[1].Value+','+$h2.Groups[2].Value
 }
 try {
   $p.Open()
@@ -41,7 +43,7 @@ try {
   $before=Cmd 'cal status'; $identity=Identity $before; Write-Output $before
   Write-Output (Cmd "status`nvm`nangle status`nserial status")
   $test=Cmd 'cal test' 700; Write-Output $test
-  if($test -notmatch '595 checks, 0 failures'){throw 'cal test failed or unexpected firmware'}
+  if($test -notmatch '659 checks, 0 failures'){throw 'cal test failed or unexpected firmware'}
   if($Mode -ne 'Selftest') {
     $start=Cmd 'cal map' 100; Write-Output $start
     if($start -notmatch 'CALMAP_BEGIN,'){throw "Map did not start: $start"}

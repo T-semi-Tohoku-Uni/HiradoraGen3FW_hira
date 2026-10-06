@@ -12,6 +12,11 @@ import struct
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+CONFIG = (ROOT / 'Core/Inc/motor_control_config.h').read_text(encoding='utf-8')
+def configured_float(name):
+    return float(re.search(r'^#define\s+'+name+r'\s+([0-9.]+)f',CONFIG,re.M)[1])
+MAP_VOLTAGE = configured_float('MOTOR_CONTROL_CAL_MAP_VOLTAGE')
+MAP_CURRENT_LIMIT = configured_float('MOTOR_CONTROL_CAL_MAP_CURRENT_LIMIT_A')
 sys.path.insert(0, str(ROOT / "build/cal_map_test_deps"))
 from elftools.elf.elffile import ELFFile
 from unicorn import Uc, UC_ARCH_ARM, UC_MODE_THUMB, UC_MODE_MCLASS, UC_HOOK_CODE
@@ -63,6 +68,7 @@ class Firmware:
             'AS5047P_GetSample': self.encoder,
             'BusVoltage_GetSample': self.bus,
             'CalibrationStore_Load': self.load,
+            'CalibrationStore_IsCurrentFormat': lambda: True,
             'CalibrationStore_Save': self.forbidden,
             'printf': self.print_formatted,
             'puts': self.puts,
@@ -149,7 +155,7 @@ class Firmware:
     def voltage(self):
         values = [struct.unpack('<f', struct.pack('<I', self.uc.reg_read(UC_ARM_REG_S0 + i)))[0] for i in range(4)]
         angle, vd, vq, vm = values
-        assert 0 <= vd <= 0.40001 and vq == 0 and vm >= 6
+        assert 0 <= vd <= MAP_VOLTAGE+1e-5 and vq == 0 and vm >= 6
         if self.last_command is not None:
             delta = math.remainder(angle - self.last_command, 2 * math.pi)
             self.raw = (self.raw + self.direction * delta / 7 * self.travel_scale) % (2 * math.pi)
@@ -178,12 +184,12 @@ class Firmware:
         offset = (direction * 7 * self.raw - 1.0) % (2 * math.pi)
         self.uc.reg_write(UC_ARM_REG_S0, struct.unpack('<I', struct.pack('<f', offset))[0])
         self.call('CalibrationStore_Make', self.SCRATCH + 256, direction & 0xFFFFFFFF)
-        self.record = bytes(self.uc.mem_read(self.SCRATCH + 256, 32))
+        self.record = bytes(self.uc.mem_read(self.SCRATCH + 256, 40))
         self.call('MotorCalibration_Init')
 
     def unchanged(self):
         assert self.call('MotorCalibration_Get', self.SCRATCH + 256)
-        assert bytes(self.uc.mem_read(self.SCRATCH + 256, 32)) == self.record
+        assert bytes(self.uc.mem_read(self.SCRATCH + 256, 40)) == self.record
         self.command('cal status')
         assert 'stored=yes' in self.log[-1]
 
@@ -207,9 +213,9 @@ class Firmware:
 def run_core(path):
     fw = Firmware(path)
     fw.command('cal test')
-    assert '595 checks, 0 failures' in ''.join(fw.log), fw.log
+    assert '659 checks, 0 failures' in ''.join(fw.log), fw.log
     assert not fw.events
-    print('cal test: 595 checks, 0 failures (ARM emulation)')
+    print('cal test: 659 checks, 0 failures (ARM emulation)')
     fw.command('cal map')
     assert 'requires valid calibration' in fw.log[-1]
     for direction in [1, -1]:
@@ -255,7 +261,7 @@ def run_faults(path):
         fw.command('cal map')
         fw.reach('MAP_FORWARD')
         if failure == 'overcurrent':
-            fw.step(current=5.01)
+            fw.step(current=MAP_CURRENT_LIMIT+0.01)
         elif failure == 'rails':
             fw.step(rails=True)
         elif failure == 'encoder':

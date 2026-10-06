@@ -107,10 +107,7 @@ static bool ConfigValid(void)
     MOTOR_CONTROL_FOC_ANGLE_MAX_AGE_US>0U && MOTOR_CONTROL_FOC_MAIN_TIMEOUT_MS>0U &&
     MOTOR_CONTROL_FOC_STANDSTILL_MS>0U && isfinite(MOTOR_CONTROL_FOC_STANDSTILL_RAD) &&
     MOTOR_CONTROL_FOC_STANDSTILL_RAD>0.0f &&
-    fabsf(MOTOR_CONTROL_FOC_CURRENT_POLARITY)==1.0f &&
-    isfinite(MOTOR_CONTROL_ENCODER_H2_AMPLITUDE_ELEC_RAD) &&
-    MOTOR_CONTROL_ENCODER_H2_AMPLITUDE_ELEC_RAD>=0.0f &&
-    isfinite(MOTOR_CONTROL_ENCODER_H2_PHASE_RAD);
+    fabsf(MOTOR_CONTROL_FOC_CURRENT_POLARITY)==1.0f;
 }
 static float Approach(float value,float goal,float step)
 {
@@ -277,13 +274,11 @@ void FocVoltage_CurrentISR(const float currents[4],bool rails,
                                        cycle_angle.mechanical_rad-calibration.offset);
   observed_correction=0.0f;
   if (h2_enabled && h2_gain!=0) {
-    float unused_sin, error_cos;
-    VoltageVector_SinCos(2.0f*cycle_angle.mechanical_rad+
-                        MOTOR_CONTROL_ENCODER_H2_PHASE_RAD,
-                        &unused_sin,&error_cos);
+    float error_sin, error_cos;
+    VoltageVector_SinCos(2.0f*cycle_angle.mechanical_rad,&error_sin,&error_cos);
     /* Error is specified directly in electrical radians in the FOC frame. */
     observed_correction=-(float)h2_gain*
-        MOTOR_CONTROL_ENCODER_H2_AMPLITUDE_ELEC_RAD*error_cos;
+        (calibration.h2_cos_rad_elec*error_cos+calibration.h2_sin_rad_elec*error_sin);
   }
   /* Preserve the original path exactly when disabled or gain is zero.
    * Park and inverse Park share this one corrected snapshot. */
@@ -405,10 +400,14 @@ bool FocVoltage_ProcessCommand(const char *command)
     else {
       printf("Usage: foc h2 on|off|gain <0|+1|-1>|status\r\n"); return true;
     }
-    printf("FOC h2: %s, gain=%d, cos amplitude=%ld mrad electrical, phase=%ld mrad\r\n",
-        h2_enabled ? "on" : "off",h2_gain,
-        (long)(MOTOR_CONTROL_ENCODER_H2_AMPLITUDE_ELEC_RAD*1000.0f),
-        (long)(MOTOR_CONTROL_ENCODER_H2_PHASE_RAD*1000.0f));
+    CalibrationRecord h2_record;
+    bool valid;
+    if (active) { h2_record=calibration; valid=true; }
+    else valid=MotorCalibration_Get(&h2_record);
+    printf("FOC h2: %s, gain=%d, valid=%u, a2=%ld b2=%ld urad_elec\r\n",
+        h2_enabled ? "on" : "off",h2_gain,(unsigned)valid,
+        valid ? (long)(h2_record.h2_cos_rad_elec*1e6f) : 0L,
+        valid ? (long)(h2_record.h2_sin_rad_elec*1e6f) : 0L);
   }
   else if (Same(arg,"stop")) FocVoltage_TripISR("user stop");
   else if (Same(arg,"start")) {

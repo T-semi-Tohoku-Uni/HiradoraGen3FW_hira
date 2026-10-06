@@ -33,6 +33,8 @@ def test(path):
     f.uc.mem_write(f.STATE, struct.pack('<4f', 1, -0.5, 1, -0.5))
     assert f.get('h2_enabled', '<?') is False
     assert f.get('h2_gain', '<i') == 1
+    a2, b2 = -0.051, 0.055
+    f.uc.mem_write(f.foc['calibration'] + 24, struct.pack('<2f', a2, b2))
     for direction in (-1, 1):
         offset = 0.73
         f.uc.mem_write(f.foc['calibration'] + 16, struct.pack('<if', direction, offset))
@@ -49,7 +51,7 @@ def test(path):
                 assert bytes(f.uc.mem_read(f.foc['cycle_angle'], 32)) == sensor
                 base = (direction * 7 * theta - offset) % (2 * math.pi)
                 # Specified electrical error is independent of calibration direction.
-                delta = -gain * 0.0750 * math.cos(2 * theta - 2.327) if enabled else 0
+                delta = -gain * (a2*math.cos(2*theta) + b2*math.sin(2*theta)) if enabled else 0
                 actual_delta = f.get('observed_correction', '<f')
                 actual = f.get('observed_electrical', '<f')
                 expected = (base + delta) % (2 * math.pi)

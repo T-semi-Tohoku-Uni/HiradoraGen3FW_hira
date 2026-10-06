@@ -275,9 +275,10 @@ static void PrintStatus(void)
          (sample_timer != NULL && (sample_timer->Instance->CR1 & TIM_CR1_CEN)) ? "TIM1" : "main",
          (unsigned long)transfers, transfer_cycles * us, max_transfer_cycles * us,
          interval_cycles * us, max_interval_cycles * us, max_launch_cycles * us);
-  printf("Encoder errors: spi=%lu, parity=%lu, sensor=%lu, timeout=%lu, busy_ticks=%lu, decode_waits=%lu, diag=0x%04X, errfl=0x%04X; displayed electrical angle is uncalibrated\r\n",
+  printf("Encoder errors: spi=%lu, parity=%lu, sensor=%lu, timeout=%lu, busy_ticks=%lu, decode_waits=%lu, diag=0x%04X, errfl=0x%04X\r\n",
          (unsigned long)spi_errors, (unsigned long)parity_errors, (unsigned long)sensor_errors,
          (unsigned long)timeouts, (unsigned long)missed, (unsigned long)decode_waits, (unsigned int)diagnostic, (unsigned int)error_flags);
+  printf("Angle display: elec_uncal is before direction/offset correction. FOC uses calibration; check 'cal status' for validity and Flash save status.\r\n");
   printf("Encoder first fault: %s, state=%lu, elapsed=%lu ns, SR=0x%08lX, RXleft=%lu, TXleft=%lu, DMA=0x%08lX\r\n",
       first_fault ? first_fault : "none", (unsigned long)fault_state,
       (unsigned long)((float)fault_cycles*(1e9f/(float)SystemCoreClock)),
@@ -302,7 +303,7 @@ bool AS5047P_ProcessCommand(const char *command)
   }
   if (Equals(command, "angle") || Equals(command, "angle start")) {
     streaming = true; report_ms = HAL_GetTick() - 100U;
-    printf("Angle display started (uncalibrated electrical angle)\r\n");
+    printf("Angle display started: elec_uncal is before direction/offset correction (not calibration status). Check 'cal status'.\r\n");
   } else if (Equals(command, "angle stop")) {
     streaming = false;
     printf("Angle display stopped; DMA acquisition continues\r\n");

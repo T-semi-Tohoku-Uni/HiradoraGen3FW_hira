@@ -57,6 +57,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/current_pi.c
     Core/Src/voltage_vector.c
     Core/Src/calibration_store.c
+    Core/Src/h2_fit.c
     Core/Src/motor_calibration.c
     Core/Src/bus_voltage.c
     Core/Src/as5047p.c
