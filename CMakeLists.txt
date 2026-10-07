@@ -108,13 +108,14 @@ set_source_files_properties(Core/Src/irq_trace.c PROPERTIES COMPILE_OPTIONS "-O2
 
 # SPI応答を次のTIM/ADC IRQより前に処理する余裕をDebugでも確保する。
 # FOC本体だけでなくHALディスパッチとIRQ入口/出口も周期処理の時間に含まれる。
-# CubeMX生成コード自体は変更しない。対象ファイルのDebugステップ順は変わり得る。
+# CubeMX生成コード自体は変更しない。ReleaseでもHAL/IRQを速度優先にする。
+# 対象ファイルのDebugステップ順は変わり得る。
 # dma_loggerはADC内の間引きとmainの200Hz整形の両方で使い、IRQの余裕を左右する。
 set_source_files_properties(Core/Src/stm32g4xx_it.c Core/Src/dma_logger.c
-    PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Debug>:-O2>")
+    PROPERTIES COMPILE_OPTIONS "-O2")
 set_source_files_properties(
     ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_adc.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_adc_ex.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_tim.c
     TARGET_DIRECTORY STM32_Drivers
-    PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Debug>:-O2>")
+    PROPERTIES COMPILE_OPTIONS "-O2")

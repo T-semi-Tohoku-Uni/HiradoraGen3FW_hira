@@ -960,7 +960,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     FocVoltage_WatchdogISR();
     return;
   }
-  AS5047P_Tick();
+  AS5047P_Watchdog();
   if (MotorControl_IsVoltageMode()) {
     __HAL_TIM_SET_COMPARE(motor_timer, TIM_CHANNEL_1, voltage_compare[0]);
     __HAL_TIM_SET_COMPARE(motor_timer, TIM_CHANNEL_2, voltage_compare[1]);
@@ -1036,9 +1036,9 @@ void MotorControl_FocAdcISR(void)
     __HAL_TIM_SET_COMPARE(motor_timer,TIM_CHANNEL_3,voltage_compare[2]);
   }
   __set_PRIMASK(mask);
-  /* 出力を停止した後はmain側の低速取得に戻す。処理完了を監視側に通知する。 */
+  /* エンコーダーはTIM8で独立動作。ここでは監視と制御完了通知のみ行う。 */
   if (MotorControl_IsVoltageMode()) {
-    AS5047P_Tick();
+    AS5047P_Watchdog();
     FocVoltage_AdcCompleteISR();
   }
 }

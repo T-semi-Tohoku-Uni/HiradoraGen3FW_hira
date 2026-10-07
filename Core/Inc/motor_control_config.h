@@ -4,7 +4,7 @@
 /* Motor and open-loop six-step parameters. */
 #define MOTOR_CONTROL_POLE_PAIRS                    7U
 
-/* 角度通信の締切と鮮度。TIM1停止中はmainから低頻度取得する。 */
+/* TIM8による連続取得の受信停止期限と鮮度。モーターPWM停止中も取得する。 */
 #define MOTOR_CONTROL_ENCODER_TIMEOUT_US            100U
 #define MOTOR_CONTROL_ENCODER_STALE_MS              10U
 #define MOTOR_CONTROL_ENCODER_DIAG_PERIOD_MS        20U

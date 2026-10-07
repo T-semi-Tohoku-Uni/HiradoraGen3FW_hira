@@ -3,18 +3,18 @@
 #include "stm32g4xx_hal.h"
 #include <stdbool.h>
 
-/* 電気角はoffset未校正。今回は観測専用。 */
+/* electrical_radはdirection/offset未校正。FOCはmechanical_radを校正して使う。 */
 typedef struct {
   uint16_t raw;
   float mechanical_rad, electrical_rad;
-  /* request: 要求転送の開始処理、received: 応答のソフトウェア解析開始。
-   * センサー内部の測定時刻やSPI最終エッジのハード時刻ではない。 */
+  /* request: 応答に対応する前フレームのTIM8送信予定時刻（保守的な基点）。
+   * received: 応答のISR取得時刻。どちらもセンサー内部の測定時刻ではない。 */
   uint32_t request_cycles, received_cycles, updated_ms, sequence;
   bool valid;
 } AS5047P_Sample;
 void AS5047P_Init(SPI_HandleTypeDef *spi, TIM_HandleTypeDef *timer);
 void AS5047P_Task(void);
-void AS5047P_Tick(void); /* FOCはADC周期末尾、それ以外はTIM1周期から呼ぶ。 */
+void AS5047P_Watchdog(void); /* main/ISR共用。通信開始はTIM8が自動で行う。 */
 bool AS5047P_GetSample(AS5047P_Sample *sample);
 bool AS5047P_ProcessCommand(const char *command);
 /* 専用DMAが所有するIRQならtrueを返す。HAL IRQとの二重処理を防ぐ。 */
