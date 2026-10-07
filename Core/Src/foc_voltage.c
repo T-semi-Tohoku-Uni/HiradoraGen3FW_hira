@@ -84,6 +84,7 @@ static bool Same(const char *s, const char *word)
   return !*s;
 }
 bool FocVoltage_IsActive(void) { return active; }
+bool FocVoltage_CanEnablePwm(void) { return active && !running && !fault; }
 void FocVoltage_TripISR(const char *reason)
 {
   if (!active) return;
@@ -183,6 +184,7 @@ void FocVoltage_TickISR(void)
     return;
   }
   uint32_t began=DWT->CYCCNT, now=HAL_GetTick();
+  IrqTrace_Event(TRACE_FOC_BEGIN);
   if (!MotorControl_IsVoltageMode()) { FocVoltage_TripISR("PWM mode lost"); return; }
   if ((uint32_t)(now-heartbeat)>MOTOR_CONTROL_FOC_MAIN_TIMEOUT_MS) { FocVoltage_TripISR("main stale"); return; }
   if ((uint32_t)(now-current_tick)>2U) { FocVoltage_TripISR("ADC stale"); return; }
@@ -225,10 +227,12 @@ void FocVoltage_TickISR(void)
   /* UVW座標で負の相順ならqも反転し、encoder増加方向のトルクを正にする。
    * 初版は角度外挿なし。前周期の取得角を使用し、古さを監視する。
    * CCRはこのISR後、次の頂点で反映（RCR=1）。センサー内部遅延は別途存在する。 */
+  IrqTrace_Event(TRACE_VOLTAGE_BEGIN);
   if (!MotorControl_SetVoltage(electrical,applied_d,
       applied_q*(float)calibration.direction,vm_cache)) {
     FocVoltage_TripISR("voltage output rejected"); return;
   }
+  IrqTrace_Event(TRACE_VOLTAGE_READY);
   ticks++;
   uint32_t spent=DWT->CYCCNT-began;
   if (spent>compute_max) compute_max=spent;
@@ -254,11 +258,13 @@ void FocVoltage_CurrentISR(const float currents[4],bool rails,
   }
   adc_seen=true;
   if (!running) return; /* 起動準備中は電流保護だけ行い、観測値を公開しない。 */
+  IrqTrace_Event(TRACE_ANGLE_BEGIN);
   if (!AS5047P_GetSample(&cycle_angle)) { FocVoltage_TripISR("encoder invalid"); return; }
   uint32_t age=DWT->CYCCNT-cycle_angle.request_cycles;
   if (age>(SystemCoreClock/1000000U)*MOTOR_CONTROL_FOC_ANGLE_MAX_AGE_US) {
     FocVoltage_TripISR("encoder age limit"); return;
   }
+  IrqTrace_Event(TRACE_ANGLE_READY);
   observation_adc_sequence=adc_sequence;
   observation_adc_cycles=adc_callback_cycles;
   /* 3相の共通成分を除いてClarke変換する。電流PIも同じdq観測を使用。
@@ -288,6 +294,7 @@ void FocVoltage_CurrentISR(const float currents[4],bool rails,
   measured_d=a*c+b*s;
   measured_q=(-a*s+b*c)*(float)calibration.direction;
   observation_valid=running;
+  IrqTrace_Event(TRACE_PARK_READY);
 }
 void FocVoltage_Task(void)
 {
@@ -371,11 +378,12 @@ static void PrintStatus(bool capture)
       (unsigned long)((float)t*(1e9f/(float)SystemCoreClock)),
       (unsigned long)((float)a*(1e9f/(float)SystemCoreClock)));
   else if(line==4) MotorControl_PrintFocPhase();
-  else if(line==5) printf("FOC PI: target=%ld/%ld mA, ref=%ld/%ld mA\r\n",
+  else if(line==5) MotorControl_PrintEncoderPhase();
+  else if(line==6) printf("FOC PI: target=%ld/%ld mA, ref=%ld/%ld mA\r\n",
       (long)(itd*1000),(long)(itq*1000),(long)(ird*1000),(long)(irq*1000));
   else printf("FOC PI: integral=%ld/%ld mV, saturated=%u\r\n",
       (long)(intd*1000),(long)(intq*1000),(unsigned)saturated);
-  line=line==(mode==CURRENT_CONTROL_MODE ? 6U : 4U) ? 0 : line+1;
+  line=line==(mode==CURRENT_CONTROL_MODE ? 7U : 5U) ? 0 : line+1;
 }
 void FocVoltage_ReportTask(void) { PrintStatus(false); }
 bool FocVoltage_ProcessCommand(const char *command)

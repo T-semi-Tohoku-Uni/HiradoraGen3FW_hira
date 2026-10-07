@@ -16,6 +16,8 @@ void AS5047P_Init(SPI_HandleTypeDef *spi, TIM_HandleTypeDef *timer);
 void AS5047P_Task(void);
 void AS5047P_Watchdog(void); /* main/ISR共用。通信開始はTIM8が自動で行う。 */
 bool AS5047P_GetSample(AS5047P_Sample *sample);
+/* Read-only phase query; caller masks IRQs for an atomic start decision. */
+bool AS5047P_GetTimerPhase(uint32_t *count);
 bool AS5047P_ProcessCommand(const char *command);
 /* 専用DMAが所有するIRQならtrueを返す。HAL IRQとの二重処理を防ぐ。 */
 bool AS5047P_DMA_IRQHandler(DMA_HandleTypeDef *dma);

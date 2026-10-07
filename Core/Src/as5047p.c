@@ -237,6 +237,7 @@ static void ReceiveFrame(void)
     overruns++; Fail("RX commit deadline");
   } else if (publish) {
     published = next;
+    MotorControl_EncoderPublishedISR();
   }
   __set_PRIMASK(mask);
   if (publish && state == RUNNING) IrqTrace_Event(TRACE_PUBLISH);
@@ -281,6 +282,18 @@ bool AS5047P_GetSample(AS5047P_Sample *sample)
     (uint32_t)(now - sample->updated_ms) < MOTOR_CONTROL_ENCODER_STALE_MS &&
     (uint32_t)(now - diag_time) < MOTOR_CONTROL_ENCODER_DIAG_STALE_MS;
   return sample->valid;
+}
+bool AS5047P_GetTimerPhase(uint32_t *count)
+{
+  if (!owned || state != RUNNING || !diagnostic_ok || !latest.valid || count == NULL)
+    return false;
+  TIM_TypeDef *tim = sample_timer->Instance;
+  if (tim->PSC != 0U || tim->ARR != FRAME_CYCLES-1U ||
+      (tim->CR1 & (TIM_CR1_CEN | TIM_CR1_DIR | TIM_CR1_CMS)) != TIM_CR1_CEN ||
+      (tim->SMCR & TIM_SMCR_SMS) ||
+      !(rx_dma->CCR & DMA_CCR_EN) || !(tx_dma->CCR & DMA_CCR_EN)) return false;
+  *count = tim->CNT;
+  return true;
 }
 static void PrintSample(void)
 {

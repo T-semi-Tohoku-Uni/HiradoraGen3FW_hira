@@ -80,6 +80,8 @@ static volatile bool outputs_enabled;
 static volatile uint32_t voltage_compare[3];
 static volatile uint32_t foc_adc_began, foc_adc_phase, foc_update_cnt, foc_adc_cnt;
 static volatile bool foc_update_down, foc_adc_down;
+static uint32_t start_phase_before, start_phase_after, start_wait_cycles;
+static volatile uint32_t publish_phase_min, publish_phase_max, publish_phase_count;
 static volatile MotorControlMode motor_mode = MOTOR_CONTROL_MODE_STOPPED;
 static volatile uint8_t current_sector;
 static volatile uint32_t reference_rpm;
@@ -154,7 +156,9 @@ static uint32_t MotorControl_GetControlTickHz(void)
   uint32_t flash_latency;
   uint32_t timer_clock_hz = HAL_RCC_GetPCLK2Freq();
   const uint32_t timer_divider = motor_timer->Instance->PSC + 1U;
-  const uint32_t half_period_counts = motor_timer->Instance->ARR + 1U;
+  /* Center-aligned: 0..ARR..0 takes 2*ARR ticks, not 2*(ARR+1). */
+  const uint32_t half_period_counts = motor_timer->Instance->ARR;
+  if (half_period_counts == 0U) return 0U;
 
   HAL_RCC_GetClockConfig(&clock_config, &flash_latency);
   if (clock_config.APB2CLKDivider != RCC_HCLK_DIV1)
@@ -173,7 +177,7 @@ static uint32_t MotorControl_MillisecondsToTicks(uint32_t milliseconds)
 
 static uint32_t MotorControl_MidpointCompare(void)
 {
-  return (__HAL_TIM_GET_AUTORELOAD(motor_timer) + 1U) / 2U;
+  return __HAL_TIM_GET_AUTORELOAD(motor_timer) / 2U;
 }
 
 static void MotorControl_WriteMidpoint(void)
@@ -305,6 +309,52 @@ i2c_error:
   return result;
 }
 
+/* Main only, IRQs enabled on entry. Success returns with IRQs masked so the
+ * caller can publish its mode before an ISR runs. No timer reset on TIM8. */
+static HAL_StatusTypeDef MotorControl_StartAligned(void)
+{
+  TIM_TypeDef *tim = motor_timer->Instance;
+  if (__get_IPSR() || __get_PRIMASK() || SystemCoreClock != 160000000U ||
+      HAL_RCC_GetPCLK2Freq() != 160000000U || tim->PSC != 0U || tim->ARR != 4000U)
+    return HAL_ERROR;
+  uint32_t began = DWT->CYCCNT;
+  start_phase_before=start_phase_after=start_wait_cycles=0U;
+  publish_phase_min=8000U; publish_phase_max=publish_phase_count=0U;
+  while ((uint32_t)(DWT->CYCCNT-began) < 32000U) {
+    uint32_t phase;
+    if (!AS5047P_GetTimerPhase(&phase) || !FocVoltage_CanEnablePwm()) return HAL_ERROR;
+    /* Enter the checks early enough that their cost does not consume the
+     * entire acceptance window. The final read below decides the phase. */
+    if (phase < 880U || phase >= 1200U) continue;
+    __disable_irq();
+    if ((uint32_t)(DWT->CYCCNT-began) >= 32000U ||
+        !FocVoltage_CanEnablePwm() || HAL_GPIO_ReadPin(GPIOE, GPIO_PIN_15)==GPIO_PIN_RESET ||
+        (tim->CR1 & TIM_CR1_CEN) || (tim->CCER & MOTOR_CONTROL_OUTPUT_ENABLE_MASK) ||
+        !AS5047P_GetTimerPhase(&phase)) {
+      __enable_irq(); return HAL_ERROR;
+    }
+    if (phase < 1120U || phase >= 1200U) { __enable_irq(); continue; }
+    start_phase_before = phase;
+    SET_BIT(tim->CCER, MOTOR_CONTROL_OUTPUT_ENABLE_MASK);
+    SET_BIT(tim->CR1, TIM_CR1_CEN);
+    SET_BIT(tim->BDTR, TIM_BDTR_MOE);
+    /* TIM8 ownership/configuration was checked above and IRQs remain masked.
+     * Only read CNT here: repeating validation would inflate this bracket. */
+    phase = TIM8->CNT;
+    start_phase_after = phase;
+    start_wait_cycles = DWT->CYCCNT-began;
+    if (phase < start_phase_before || phase >= 1280U) {
+      CLEAR_BIT(tim->BDTR, TIM_BDTR_MOE);
+      CLEAR_BIT(tim->CR1, TIM_CR1_CEN);
+      CLEAR_BIT(tim->CCER, MOTOR_CONTROL_OUTPUT_ENABLE_MASK);
+      __enable_irq(); return HAL_ERROR;
+    }
+    return HAL_OK;
+  }
+  start_wait_cycles = DWT->CYCCNT-began;
+  return HAL_TIMEOUT;
+}
+
 static HAL_StatusTypeDef MotorControl_StartAtMidpoint(void)
 {
   TIM_TypeDef *tim = motor_timer->Instance;
@@ -331,23 +381,33 @@ static HAL_StatusTypeDef MotorControl_StartAtMidpoint(void)
     return result;
   }
 
-  /* Enable all six pins together, then start the counter and main output. */
-  SET_BIT(tim->CCER, MOTOR_CONTROL_OUTPUT_ENABLE_MASK);
-  SET_BIT(tim->CR1, TIM_CR1_CEN);
-  SET_BIT(tim->BDTR, TIM_BDTR_MOE);
+  if (FocVoltage_IsActive()) {
+    __set_PRIMASK(interrupt_state);
+    result = MotorControl_StartAligned();
+    if (result != HAL_OK) {
+      printf("FOC phase start failed: status=%u, wait=%lu ticks\r\n",
+             (unsigned)result,(unsigned long)start_wait_cycles);
+      return result;
+    }
+  } else {
+    /* Calibration/manual modes retain their original start timing. */
+    SET_BIT(tim->CCER, MOTOR_CONTROL_OUTPUT_ENABLE_MASK);
+    SET_BIT(tim->CR1, TIM_CR1_CEN);
+    SET_BIT(tim->BDTR, TIM_BDTR_MOE);
+  }
 
   current_sector = 0U;
   reference_rpm = 0U;
   current_duty_x10 = 0U;
   motor_mode = MOTOR_CONTROL_MODE_MANUAL;
+  selected_offset_percent = 0.0f;
+  outputs_enabled = true;
 
   if (interrupt_state == 0U)
   {
     __enable_irq();
   }
 
-  selected_offset_percent = 0.0f;
-  outputs_enabled = true;
   return HAL_OK;
 }
 
@@ -386,7 +446,7 @@ static uint32_t MotorControl_SixStepDutyX10(void)
 static uint32_t MotorControl_SixStepCompare(uint32_t duty_x10)
 {
   uint32_t compare =
-    (uint32_t)((((uint64_t)(__HAL_TIM_GET_AUTORELOAD(motor_timer) + 1U) *
+    (uint32_t)((((uint64_t)(__HAL_TIM_GET_AUTORELOAD(motor_timer)) *
                  duty_x10) + 500U) / 1000U);
 
   if (compare == 0U)
@@ -697,7 +757,7 @@ static bool MotorControl_ParseOffset(const char *text, float *offset_percent)
 static void MotorControl_ApplyOffset(MotorControlPhase phase, float offset_percent)
 {
   const float timer_counts =
-    (float)(__HAL_TIM_GET_AUTORELOAD(motor_timer) + 1U);
+    (float)__HAL_TIM_GET_AUTORELOAD(motor_timer);
   const float compare_value =
     timer_counts * (0.5f + (offset_percent / 100.0f));
   const uint32_t rounded_compare =
@@ -1001,7 +1061,7 @@ bool MotorControl_SetVoltage(float angle, float vd, float vq, float vm)
                              MOTOR_CONTROL_PWM_MARGIN, duty)) return false;
   uint32_t compare[3];
   for (unsigned i=0; i<3; i++) compare[i] = (uint32_t)(duty[i] *
-      (float)(__HAL_TIM_GET_AUTORELOAD(motor_timer)+1U) + 0.5f);
+      (float)__HAL_TIM_GET_AUTORELOAD(motor_timer) + 0.5f);
   /* mainからCCRを直接更新すると更新イベントが3相の途中に来る可能性がある。
    * RAMへ公開する。FOCはADC ISRでpreloadへ書いて次の頂点で反映。
    * 校正は従来どおり底ISRでpreloadへ書いて次の底で反映。 */
@@ -1059,7 +1119,32 @@ void MotorControl_PrintFocPhase(void)
   uint32_t update=foc_update_cnt, adc=foc_adc_cnt;
   bool ud=foc_update_down, ad=foc_adc_down;
   __set_PRIMASK(mask);
-  printf("FOC phase: update CNT=%lu DIR=%u, ADC CNT=%lu DIR=%u (ARR=%lu)\r\n",
+  printf("FOC phase: update CNT=%lu DIR=%u, ADC CNT=%lu DIR=%u (ARR=%lu), start=%lu..%lu wait=%lu ticks\r\n",
       (unsigned long)update,ud,(unsigned long)adc,ad,
-      (unsigned long)__HAL_TIM_GET_AUTORELOAD(motor_timer));
+      (unsigned long)__HAL_TIM_GET_AUTORELOAD(motor_timer),
+      (unsigned long)start_phase_before,(unsigned long)start_phase_after,(unsigned long)start_wait_cycles);
+}
+
+/* Called immediately after publishing, with IRQs masked. CNT/DIR must agree
+ * across the read; a direction transition is outside the expected late phase. */
+void MotorControl_EncoderPublishedISR(void)
+{
+  if (motor_mode != MOTOR_CONTROL_MODE_VOLTAGE || !FocVoltage_IsActive()) return;
+  TIM_TypeDef *tim = motor_timer->Instance;
+  uint32_t dir = tim->CR1 & TIM_CR1_DIR;
+  uint32_t cnt = tim->CNT;
+  if (dir != (tim->CR1 & TIM_CR1_DIR)) return;
+  uint32_t phase = dir ? 4000U-cnt : 4000U+cnt;
+  if (phase < publish_phase_min) publish_phase_min=phase;
+  if (phase > publish_phase_max) publish_phase_max=phase;
+  publish_phase_count++;
+}
+void MotorControl_PrintEncoderPhase(void)
+{
+  uint32_t mask=__get_PRIMASK(); __disable_irq();
+  uint32_t lo=publish_phase_min, hi=publish_phase_max, n=publish_phase_count;
+  __set_PRIMASK(mask);
+  printf("FOC encoder phase: publish=%lu..%lu ticks, count=%lu, next_peak_margin=%lu ticks\r\n",
+      (unsigned long)lo,(unsigned long)hi,(unsigned long)n,
+      (unsigned long)(n && hi<=8000U ? 8000U-hi : 0U));
 }

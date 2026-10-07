@@ -66,6 +66,8 @@ HAL_StatusTypeDef MotorControl_ResetTimerPhase(TIM_HandleTypeDef *timer);
 void MotorControl_FocAdcISR(void);
 void MotorControl_FocAdcBeginISR(void);
 void MotorControl_PrintFocPhase(void);
+void MotorControl_EncoderPublishedISR(void);
+void MotorControl_PrintEncoderPhase(void);
 bool MotorControl_IsStopped(void);
 bool MotorControl_IsVoltageMode(void);
 /* Fixed ADC/PWM control period derived from the initialized TIM1 clock. */
