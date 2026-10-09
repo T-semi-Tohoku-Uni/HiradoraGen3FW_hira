@@ -22,7 +22,6 @@
 #include "stm32g4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "irq_trace.h"
 #include "as5047p.h"
 /* USER CODE END Includes */
 
@@ -60,8 +59,8 @@
 extern ADC_HandleTypeDef hadc1;
 extern ADC_HandleTypeDef hadc2;
 extern DMA_HandleTypeDef hdma_spi1_rx;
+extern DMA_HandleTypeDef hdma_spi1_tx;
 extern SPI_HandleTypeDef hspi1;
-extern DMA_HandleTypeDef hdma_tim8_ch2;
 extern TIM_HandleTypeDef htim1;
 extern DMA_HandleTypeDef hdma_usart1_tx;
 extern UART_HandleTypeDef huart1;
@@ -227,13 +226,11 @@ void DMA1_Channel1_IRQHandler(void)
 void DMA1_Channel2_IRQHandler(void)
 {
   /* USER CODE BEGIN DMA1_Channel2_IRQn 0 */
-  IrqTrace_Event(TRACE_RX_IN);
-  if (AS5047P_DMA_IRQHandler(&hdma_spi1_rx)) { IrqTrace_Event(TRACE_RX_OUT); return; } /* 専用処理済みならHALで再処理しない。 */
+  if (AS5047P_DMA_IRQHandler(&hdma_spi1_rx)) return; /* 専用処理済みならHALで再処理しない。 */
 
   /* USER CODE END DMA1_Channel2_IRQn 0 */
   HAL_DMA_IRQHandler(&hdma_spi1_rx);
   /* USER CODE BEGIN DMA1_Channel2_IRQn 1 */
-  IrqTrace_Event(TRACE_RX_OUT);
 
   /* USER CODE END DMA1_Channel2_IRQn 1 */
 }
@@ -244,10 +241,10 @@ void DMA1_Channel2_IRQHandler(void)
 void DMA1_Channel3_IRQHandler(void)
 {
   /* USER CODE BEGIN DMA1_Channel3_IRQn 0 */
-  if (AS5047P_DMA_IRQHandler(&hdma_tim8_ch2)) return; /* 専用処理済みならHALで再処理しない。 */
+  if (AS5047P_DMA_IRQHandler(hspi1.hdmatx)) return; /* 専用処理済みならHALで再処理しない。 */
 
   /* USER CODE END DMA1_Channel3_IRQn 0 */
-  HAL_DMA_IRQHandler(&hdma_tim8_ch2);
+  HAL_DMA_IRQHandler(&hdma_spi1_tx);
   /* USER CODE BEGIN DMA1_Channel3_IRQn 1 */
 
   /* USER CODE END DMA1_Channel3_IRQn 1 */
@@ -259,13 +256,11 @@ void DMA1_Channel3_IRQHandler(void)
 void ADC1_2_IRQHandler(void)
 {
   /* USER CODE BEGIN ADC1_2_IRQn 0 */
-  IrqTrace_Event(TRACE_ADC_IN);
 
   /* USER CODE END ADC1_2_IRQn 0 */
   HAL_ADC_IRQHandler(&hadc1);
   HAL_ADC_IRQHandler(&hadc2);
   /* USER CODE BEGIN ADC1_2_IRQn 1 */
-  IrqTrace_Event(TRACE_ADC_OUT);
 
   /* USER CODE END ADC1_2_IRQn 1 */
 }
@@ -276,12 +271,10 @@ void ADC1_2_IRQHandler(void)
 void TIM1_UP_TIM16_IRQHandler(void)
 {
   /* USER CODE BEGIN TIM1_UP_TIM16_IRQn 0 */
-  IrqTrace_Event(TRACE_TIM_IN);
 
   /* USER CODE END TIM1_UP_TIM16_IRQn 0 */
   HAL_TIM_IRQHandler(&htim1);
   /* USER CODE BEGIN TIM1_UP_TIM16_IRQn 1 */
-  IrqTrace_Event(TRACE_TIM_OUT);
 
   /* USER CODE END TIM1_UP_TIM16_IRQn 1 */
 }

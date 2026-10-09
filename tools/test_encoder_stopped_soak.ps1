@@ -25,7 +25,7 @@ function Snapshot([string]$label) {
  Write-Output $label
  Write-Output (("$status$enc$serial$adc" -split "`n" | Where-Object {$_ -notmatch '^>' -and $_.Trim()}) -join "`n")
  if($enc -notmatch 'AS5047P OK'){throw 'Encoder sample invalid or response missing'}
- if($enc -notmatch 'Encoder errors: spi=0, parity=0, sensor=0, timeout=0, overruns=0,'){throw 'Encoder error detected; preserving first-fault evidence'}
+ if($enc -notmatch 'Encoder errors: spi=0, parity=0, sensor=0, timeout=0, busy_ticks=\d+, decode_waits=\d+,'){throw 'Encoder error detected; preserving first-fault evidence'}
  if($serial -notmatch 'Serial RX: errors=0, overrun=0, queue_drops=0, long_lines=0,'){throw 'Serial error detected'}
 }
 try {

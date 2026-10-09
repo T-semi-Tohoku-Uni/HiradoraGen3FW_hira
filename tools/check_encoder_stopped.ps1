@@ -1,4 +1,4 @@
-param([string]$Port='COM6', [string]$Log='build/encoder_stopped_2026-10-07.log')
+param([string]$Port='COM6', [string]$Log=("build/encoder_stopped_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss')))
 $ErrorActionPreference='Stop'
 $p=[IO.Ports.SerialPort]::new($Port,921600,[IO.Ports.Parity]::None,8,[IO.Ports.StopBits]::One)
 $p.ReadBufferSize=262144

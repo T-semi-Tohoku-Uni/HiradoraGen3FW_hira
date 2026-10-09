@@ -7,17 +7,15 @@
 typedef struct {
   uint16_t raw;
   float mechanical_rad, electrical_rad;
-  /* request: 応答に対応する前フレームのTIM8送信予定時刻（保守的な基点）。
+  /* request: 要求フレームの通信開始処理に入った時刻。
    * received: 応答のISR取得時刻。どちらもセンサー内部の測定時刻ではない。 */
   uint32_t request_cycles, received_cycles, updated_ms, sequence;
   bool valid;
 } AS5047P_Sample;
 void AS5047P_Init(SPI_HandleTypeDef *spi, TIM_HandleTypeDef *timer);
 void AS5047P_Task(void);
-void AS5047P_Watchdog(void); /* main/ISR共用。通信開始はTIM8が自動で行う。 */
+void AS5047P_Tick(void); /* TIM1/FOC ADC末尾から次の要求を開始。 */
 bool AS5047P_GetSample(AS5047P_Sample *sample);
-/* Read-only phase query; caller masks IRQs for an atomic start decision. */
-bool AS5047P_GetTimerPhase(uint32_t *count);
 bool AS5047P_ProcessCommand(const char *command);
 /* 専用DMAが所有するIRQならtrueを返す。HAL IRQとの二重処理を防ぐ。 */
 bool AS5047P_DMA_IRQHandler(DMA_HandleTypeDef *dma);

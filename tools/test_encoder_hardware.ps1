@@ -1,7 +1,7 @@
 param([string]$Port='COM6',[ValidateRange(-0.4,0.4)][double]$Vq=0.1,
  [ValidateRange(500,600000)][int]$DurationMs=3000,
- [string]$Log='build/encoder_tim8_run.log',[switch]$StressStatus,[switch]$NoAdc,[switch]$Trace,
- [ValidateRange(100,200)][int]$Decimation=200,[switch]$LegacyEncoder)
+ [string]$Log=("build/encoder_run_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss')),[switch]$StressStatus,[switch]$NoAdc,
+ [ValidateRange(100,200)][int]$Decimation=200)
 $ErrorActionPreference='Stop'
 if([math]::Abs($Vq) -lt 0.05){throw 'Use magnitude 0.05..0.4 V'}
 $p=[IO.Ports.SerialPort]::new($Port,921600,[IO.Ports.Parity]::None,8,[IO.Ports.StopBits]::One)
@@ -17,7 +17,7 @@ function Receive([int]$ms){
 }
 function Cmd([string]$s,[int]$ms=200){$writer.WriteLine("# COMMAND $s");$p.Write($s+"`n");Receive $ms}
 function CheckEncoder([string]$s){
- $clean=if($LegacyEncoder){'Encoder errors: spi=0, parity=0, sensor=0, timeout=0, busy_ticks=\d+, decode_waits=\d+,'}else{'Encoder errors: spi=0, parity=0, sensor=0, timeout=0, overruns=0,'}
+ $clean='Encoder errors: spi=0, parity=0, sensor=0, timeout=0, busy_ticks=\d+, decode_waits=\d+,'
  if($s -notmatch 'AS5047P OK' -or $s -notmatch $clean){
   throw "Encoder not clean: $s"
  }
@@ -34,10 +34,6 @@ try {
  if([double]$Matches[1] -ge 50){throw 'Temperature threshold 50 C'}
  $set=Cmd ('foc voltage 0 '+$Vq.ToString([Globalization.CultureInfo]::InvariantCulture));Write-Output $set
  if($set -notmatch 'FOC voltage set:'){throw 'Voltage command rejected'}
- if($Trace){
-  $armed=Cmd 'angle trace';Write-Output $armed
-  if($armed -notmatch 'Trace armed'){throw 'Trace arm failed'}
- }
  $run=[Diagnostics.Stopwatch]::StartNew()
  $start=Cmd 'foc start' 100;Write-Output $start
  if($start -notmatch 'FOC voltage start:'){throw 'Start rejected'}
@@ -63,7 +59,6 @@ try {
   $null=Cmd 'stop';$null=Cmd 'adc stop' 400
   foreach($s in @('foc status','angle status','serial status','status','vm')){Write-Output (Cmd $s 300)}
   $temp=Cmd 'ntc' 1200;Write-Output $temp;$null=Cmd 'ntc stop'
-  if($Trace){Write-Output (Cmd 'angle trace dump' 1500)}
  } finally {$p.Close()}}
  $p.Dispose();$writer.Dispose()
 }

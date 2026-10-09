@@ -52,7 +52,6 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Drivers/CMSIS/DSP/Source/ControllerFunctions/arm_sin_cos_f32.c
     Drivers/CMSIS/DSP/Source/CommonTables/arm_common_tables.c
-    Core/Src/irq_trace.c
     Core/Src/foc_voltage.c
     Core/Src/current_pi.c
     Core/Src/voltage_vector.c
@@ -102,9 +101,6 @@ set_source_files_properties(
     Core/Src/as5047p.c Core/Src/current_sense.c Core/Src/motor_control.c
     Drivers/CMSIS/DSP/Source/ControllerFunctions/arm_sin_cos_f32.c
     PROPERTIES COMPILE_OPTIONS "-O2")
-
-# 計測フックの負荷をDebugでも小さく保つ。
-set_source_files_properties(Core/Src/irq_trace.c PROPERTIES COMPILE_OPTIONS "-O2")
 
 # SPI応答を次のTIM/ADC IRQより前に処理する余裕をDebugでも確保する。
 # FOC本体だけでなくHALディスパッチとIRQ入口/出口も周期処理の時間に含まれる。

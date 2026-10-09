@@ -19,7 +19,6 @@ typedef struct {
 } FocVoltage_Observation;
 bool FocVoltage_GetObservationISR(FocVoltage_Observation *observation);
 bool FocVoltage_IsActive(void);
-bool FocVoltage_CanEnablePwm(void);
 bool FocVoltage_ProcessCommand(const char *command);
 void FocVoltage_Task(void);
 void FocVoltage_ReportTask(void);

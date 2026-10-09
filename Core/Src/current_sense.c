@@ -1,5 +1,4 @@
 #include "current_sense.h"
-#include "irq_trace.h"
 
 #include "dma_logger.h"
 #include "bus_voltage.h"
@@ -483,7 +482,6 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
     offset_sums[3] += w_raw;
   }
   if (control_acquisition) {
-    IrqTrace_Event(TRACE_CURRENT_BEGIN);
     const uint16_t raw[4] = {u1_raw, v_raw, u2_raw, w_raw};
     float currents[4];
     bool rails = false;
@@ -491,7 +489,6 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
       currents[i] = ((float)raw[i] - offsets[i]) * amps_per_count;
       if (raw[i] < 16U || raw[i] > 4079U) rails = true;
     }
-    IrqTrace_Event(TRACE_CURRENT_READY);
     MotorCalibration_CurrentISR(currents, rails);
     FocVoltage_CurrentISR(currents, rails, index, callback_cycles);
   }
