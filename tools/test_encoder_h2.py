@@ -12,8 +12,8 @@ from unicorn import UC_HOOK_CODE
 from unicorn.arm_const import UC_ARM_REG_R0, UC_ARM_REG_PC, UC_ARM_REG_LR
 
 
-def test(path):
-    f = Firmware(path)
+def test(path, factory=Firmware):
+    f = factory(path)
     sensor = bytes(32)
 
     def stub(uc, address, size, data):

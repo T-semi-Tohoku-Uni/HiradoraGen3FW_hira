@@ -28,6 +28,7 @@
 #include "motor_control.h"
 #include "motor_calibration.h"
 #include "foc_voltage.h"
+#include "voltage_vector.h"
 #include "ntc.h"
 #include "stspin32g4.h"
 #include <ctype.h>
@@ -238,6 +239,7 @@ int main(void)
   MX_OPAMP3_Init();
   MX_SPI1_Init();
   /* USER CODE BEGIN 2 */
+  VoltageVector_Init();
   Console_Init(&huart1);
 
   if (CurrentSense_Init(&hadc1,

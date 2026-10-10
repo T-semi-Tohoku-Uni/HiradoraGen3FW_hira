@@ -40,7 +40,7 @@
 /* dq電圧一定FOCの実験用。通常運転の保護にはCURRENT_LIMIT_Aを使う。 */
 #define MOTOR_CONTROL_FOC_MAX_VOLTS                 1.0f
 #define MOTOR_CONTROL_FOC_SLEW_VOLTS_PER_SEC        1.0f
-#define MOTOR_CONTROL_FOC_MAX_RPM                   600.0f
+#define MOTOR_CONTROL_FOC_MAX_RPM                   1000.0f
 #define MOTOR_CONTROL_FOC_ANGLE_MAX_AGE_US          250U
 #define MOTOR_CONTROL_FOC_MAIN_TIMEOUT_MS          20U
 #define MOTOR_CONTROL_FOC_STANDSTILL_MS            300U

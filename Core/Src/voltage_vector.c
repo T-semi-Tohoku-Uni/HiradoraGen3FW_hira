@@ -1,14 +1,27 @@
 #include "voltage_vector.h"
 #include <math.h>
 #include "arm_math.h"
+#if FOC_USE_CORDIC
+#include "stm32g4xx_hal.h"
+#include "stm32g4xx_ll_cordic.h"
+#endif
 #define TWO_PI 6.2831853071795864769f
+void VoltageVector_Init(void)
+{
+#if FOC_USE_CORDIC
+  __HAL_RCC_CORDIC_CLK_ENABLE();
+  LL_CORDIC_Config(CORDIC, LL_CORDIC_FUNCTION_COSINE,
+      LL_CORDIC_PRECISION_6CYCLES, LL_CORDIC_SCALE_0,
+      LL_CORDIC_NBWRITE_2, LL_CORDIC_NBREAD_2,
+      LL_CORDIC_INSIZE_32BITS, LL_CORDIC_OUTSIZE_32BITS);
+#endif
+}
 float VoltageVector_Wrap(float angle)
 {
   float value = fmodf(angle, TWO_PI);
   return value < 0.0f ? value + TWO_PI : value;
 }
-/* 同梱CMSIS-DSPのテーブル補間を使う。周辺設定やCORDICレジスタは変更しない。
- * CMSIS側は度単位なので、有限のラジアンを1回転内へ正規化してから渡す。 */
+/* Normalise once before either backend. CMSIS takes degrees. */
 void VoltageVector_SinCos(float angle, float *s, float *c)
 {
   VoltageVector_SinCosWrapped(VoltageVector_Wrap(angle), s, c);
@@ -18,7 +31,29 @@ void VoltageVector_SinCosWrapped(float angle, float *s, float *c)
   /* Wrap can round a tiny negative remainder + 2*pi to exactly 2*pi.
    * Match the previous second fmodf at that endpoint. */
   if (angle == TWO_PI) angle = 0.0f;
+#if FOC_USE_CORDIC
+  /* CORDIC angle is radians/pi in signed Q1.31, in [-1,1).
+   * Fold [pi,2*pi) to [-pi,0); guard float rounding before integer conversion. */
+  if (!isfinite(angle)) { *s = NAN; *c = NAN; return; }
+  if (angle >= 0.5f*TWO_PI) angle -= TWO_PI;
+  float scaled = angle * (2147483648.0f / (0.5f*TWO_PI));
+  int32_t input = scaled >= 2147483648.0f ? INT32_MAX :
+      scaled <= -2147483648.0f ? INT32_MIN : (int32_t)scaled;
+  /* Main calibration/test calls can be preempted by the ADC ISR. Protect
+   * only the peripheral transaction; restore the caller's interrupt state.
+   * RDATA reads stall until ready (zero-overhead mode). Always drain both. */
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  CORDIC->WDATA = (uint32_t)input;
+  CORDIC->WDATA = 0x7fffffffU; /* unit modulus, supplied on every call */
+  int32_t cosine = (int32_t)CORDIC->RDATA;
+  int32_t sine = (int32_t)CORDIC->RDATA;
+  __set_PRIMASK(primask);
+  *c = (float)cosine * (1.0f/2147483648.0f);
+  *s = (float)sine * (1.0f/2147483648.0f);
+#else
   arm_sin_cos_f32(angle * (360.0f / TWO_PI), s, c);
+#endif
 }
 bool VoltageVector_Compute(float angle, float vd, float vq, float vm,
                            float limit, float margin, float duty[3])

@@ -264,6 +264,11 @@ bool MotorCalibration_ProcessCommand(const char *command)
     if (MotorCalibration_IsActive() || !MotorControl_IsStopped() || CurrentSense_IsBusy())
       printf("Selftest requires stopped PWM and ADC\r\n");
     else SelfTest();
+  } else if (Same(arg,"trig test")) {
+    if (FocVoltage_IsActive() || MotorCalibration_IsActive() ||
+        !MotorControl_IsStopped() || CurrentSense_IsBusy())
+      printf("Trig test requires stopped FOC/PWM/calibration/ADC log\r\n");
+    else VoltageVector_TrigTest();
   } else if (Same(arg,"stop")) {
     MotorCalibration_Stop();
   } else if (Same(arg,"save")) {
@@ -325,7 +330,7 @@ bool MotorCalibration_ProcessCommand(const char *command)
     operation = CAL_OP_NORMAL; Enter(CHECK_STILL, task_ms);
     printf("Manual calibration started: free rotor required, max %.2f V / %.2f A; stop aborts\r\n",
            (double)MOTOR_CONTROL_CAL_VOLTAGE, (double)MOTOR_CONTROL_CAL_CURRENT_LIMIT_A);
-  } else printf("Usage: cal start | cal map | cal map apply | cal status | cal stop | cal save | cal test\r\n");
+  } else printf("Usage: cal start | cal map | cal map apply | cal status | cal stop | cal save | cal test | cal trig test\r\n");
   return true;
 }
 static void StartMap(void)
