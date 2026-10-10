@@ -39,6 +39,7 @@ static volatile uint32_t heartbeat, current_tick, started_ms, ticks, compute_max
 static volatile uint32_t adc_complete_cycles;
 static volatile bool adc_completed;
 static float observed_electrical;
+static float observed_sin, observed_cos;
 static float observed_base_electrical, observed_correction;
 static volatile bool h2_enabled; /* Boot OFF; no Flash persistence. */
 static volatile int h2_gain = 1;
@@ -83,6 +84,7 @@ static bool Same(const char *s, const char *word)
   return !*s;
 }
 bool FocVoltage_IsActive(void) { return active; }
+bool FocVoltage_IsRunning(void) { return running; }
 void FocVoltage_TripISR(const char *reason)
 {
   if (!active) return;
@@ -224,7 +226,7 @@ void FocVoltage_TickISR(void)
   /* UVW座標で負の相順ならqも反転し、encoder増加方向のトルクを正にする。
    * 初版は角度外挿なし。前周期の取得角を使用し、古さを監視する。
    * CCRはこのISR後、次の頂点で反映（RCR=1）。センサー内部遅延は別途存在する。 */
-  if (!MotorControl_SetVoltage(electrical,applied_d,
+  if (!MotorControl_SetVoltageSinCos(observed_sin,observed_cos,applied_d,
       applied_q*(float)calibration.direction,vm_cache)) {
     FocVoltage_TripISR("voltage output rejected"); return;
   }
@@ -258,6 +260,9 @@ void FocVoltage_CurrentISR(const float currents[4],bool rails,
   if (age>(SystemCoreClock/1000000U)*MOTOR_CONTROL_FOC_ANGLE_MAX_AGE_US) {
     FocVoltage_TripISR("encoder age limit"); return;
   }
+  /* Snapshot is fixed for this ADC cycle. Start the next request before Park/PI;
+   * DMA response handling remains lower priority and cannot replace this copy. */
+  AS5047P_Tick();
   observation_adc_sequence=adc_sequence;
   observation_adc_cycles=adc_callback_cycles;
   /* 3相の共通成分を除いてClarke変換する。電流PIも同じdq観測を使用。
@@ -283,7 +288,12 @@ void FocVoltage_CurrentISR(const float currents[4],bool rails,
    * Park and inverse Park share this one corrected snapshot. */
   observed_electrical=observed_correction==0.0f ? observed_base_electrical :
       VoltageVector_Wrap(observed_base_electrical+observed_correction);
-  VoltageVector_SinCos(observed_electrical,&s,&c);
+  /* The angle-based voltage API used to reject nonfinite angles. Keep that
+   * protection before publishing a pair to the sin/cos-based output API. */
+  if (!isfinite(observed_electrical)) { FocVoltage_TripISR("electrical angle invalid"); return; }
+  VoltageVector_SinCosWrapped(observed_electrical,&s,&c);
+  observed_sin=s;
+  observed_cos=c;
   measured_d=a*c+b*s;
   measured_q=(-a*s+b*c)*(float)calibration.direction;
   observation_valid=running;

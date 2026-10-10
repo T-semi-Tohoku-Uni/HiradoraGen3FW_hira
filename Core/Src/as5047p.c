@@ -52,6 +52,67 @@ static volatile uint16_t diagnostic, error_flags;
 static uint32_t fallback_ms, report_ms;
 static bool streaming;
 static unsigned status_line;
+#ifdef ENCODER_TIMING_PROBE
+/* Investigation-only timestamps. No UART from ISR; freeze one DECODING wait
+ * and its following publication/ADC use. Production builds exclude all hooks. */
+static volatile bool probe_armed, probe_pending, probe_ready;
+static volatile uint32_t probe_req_irq, probe_resp_irq, probe_decode, probe_adc;
+static volatile uint32_t probe_received;
+static volatile uint32_t probe_use_time, probe_use_seq, probe_use_request;
+typedef struct {
+  uint32_t request, req_irq, resp_irq, decode, adc, use_time, use_seq, use_request;
+  uint32_t wait, ipsr, active_dma, active_adc, received, publish, new_seq;
+  uint32_t next_use, next_seq, next_request, address;
+} TimingProbe;
+static volatile TimingProbe probe;
+void AS5047P_TimingAdcBegin(void)
+{
+  if (probe_armed) probe_adc=DWT->CYCCNT;
+}
+static void ProbeWait(void)
+{
+  if (!probe_armed || address != REG_ANGLE || __get_IPSR() != (uint32_t)ADC1_2_IRQn+16U) return;
+  probe.wait=DWT->CYCCNT;
+  probe.request=start_cycles; probe.req_irq=probe_req_irq;
+  probe.resp_irq=probe_resp_irq; probe.decode=probe_decode;
+  probe.adc=probe_adc; probe.use_time=probe_use_time;
+  probe.use_seq=probe_use_seq; probe.use_request=probe_use_request;
+  probe.ipsr=__get_IPSR();
+  probe.active_dma=NVIC_GetActive(DMA1_Channel2_IRQn);
+  probe.active_adc=NVIC_GetActive(ADC1_2_IRQn);
+  probe.address=address;
+  probe.received=probe_received;
+  probe_armed=false; probe_pending=true;
+}
+static void ProbeUse(const AS5047P_Sample *sample)
+{
+  if (__get_IPSR() != (uint32_t)ADC1_2_IRQn+16U) return;
+  if (probe_armed) {
+    probe_use_time=DWT->CYCCNT; probe_use_seq=sample->sequence;
+    probe_use_request=sample->request_cycles;
+  } else if (probe_pending && probe.publish) {
+    probe.next_use=DWT->CYCCNT; probe.next_seq=sample->sequence;
+    probe.next_request=sample->request_cycles;
+    probe_pending=false; probe_ready=true;
+  }
+}
+static void ProbeDump(void)
+{
+  if (!MotorControl_IsStopped()) { printf("TIMING stop PWM before dump\r\n"); return; }
+  printf("TIMING status armed=%u pending=%u ready=%u hz=%lu\r\n",
+      (unsigned)probe_armed,(unsigned)probe_pending,(unsigned)probe_ready,(unsigned long)SystemCoreClock);
+  if (!probe_ready) return;
+  printf("TIMING transfer %lu,%lu,%lu,%lu,%lu,%lu,%lu\r\n",
+      (unsigned long)probe.request,(unsigned long)probe.req_irq,(unsigned long)probe.resp_irq,
+      (unsigned long)probe.decode,(unsigned long)probe.received,(unsigned long)probe.publish,(unsigned long)probe.address);
+  printf("TIMING wait %lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu\r\n",
+      (unsigned long)probe.adc,(unsigned long)probe.use_time,(unsigned long)probe.use_seq,
+      (unsigned long)probe.use_request,(unsigned long)probe.wait,(unsigned long)probe.ipsr,
+      (unsigned long)probe.active_dma,(unsigned long)probe.active_adc);
+  printf("TIMING next %lu,%lu,%lu,%lu\r\n",(unsigned long)probe.new_seq,
+      (unsigned long)probe.next_use,(unsigned long)probe.next_seq,(unsigned long)probe.next_request);
+}
+#endif
 /* 復旧で消える周辺状態を最初の異常時だけ保存する。ISRでは文字列整形しない。
  * state: 2=要求フレーム、3=応答フレーム。残数0かつTCありならDMA転送は完了し、
  * 完了ISRの処理待ちである可能性を切り分けられる。リセットで記録をクリアする。 */
@@ -132,6 +193,12 @@ bool AS5047P_DMA_IRQHandler(DMA_HandleTypeDef *dma)
   if ((rflags & rx_te) || (tflags & tx_te)) {
     RecordFault("DMA transfer error"); StopDma(); spi_errors++; Fail();
   } else if (dma == encoder_spi->hdmarx && (rflags & rx_tc)) {
+#ifdef ENCODER_TIMING_PROBE
+    if (probe_armed) {
+      if (state == REQUEST) probe_req_irq=DWT->CYCCNT;
+      if (state == RESPONSE) probe_resp_irq=DWT->CYCCNT;
+    }
+#endif
     StopDma();
     if (!WaitIdle()) { RecordFault("SPI BSY timeout"); timeouts++; Fail(); }
     else FrameComplete();
@@ -157,10 +224,16 @@ static void StartRead(void)
       if (Expired()) { RecordFault("TIM transfer timeout"); timeouts++; Fail(); }
     } else if (state == DECODING) {
       decode_waits++; /* 転送済みでも角度公開待ちなら次の取得を開始できない。 */
+#ifdef ENCODER_TIMING_PROBE
+      ProbeWait();
+#endif
     }
     return;
   }
   state = REQUEST;
+#ifdef ENCODER_TIMING_PROBE
+  if (probe_armed) probe_received=0;
+#endif
   start_cycles = DWT->CYCCNT;
   if (transfers != 0U) {
     interval_cycles = start_cycles - last_start_cycles;
@@ -186,7 +259,12 @@ static void FrameComplete(void)
   if (state != REQUEST && state != RESPONSE) return;
   /* 応答のDMAは既に完了。以降のCPU処理は転送タイムアウトと区別する。
    * 高優先度ISRに中断されても、FOCの角度鮮度監視は独立して継続する。 */
-  if (state == RESPONSE) state = DECODING;
+  if (state == RESPONSE) {
+#ifdef ENCODER_TIMING_PROBE
+    if (probe_armed) probe_decode=DWT->CYCCNT;
+#endif
+    state = DECODING;
+  }
   uint16_t response = rx_word;
   /* BSY解除を確認済み。各16bitの間でCSをHighに戻す。 */
   DelayCs();
@@ -200,6 +278,10 @@ static void FrameComplete(void)
   }
   if (state != DECODING) return;
   uint32_t received = DWT->CYCCNT;
+#ifdef ENCODER_TIMING_PROBE
+  if (probe_armed) probe_received=received;
+  if (probe_pending && probe.request == start_cycles) probe.received=received;
+#endif
   transfer_cycles = received - start_cycles;
   if (transfer_cycles > max_transfer_cycles) max_transfer_cycles = transfer_cycles;
   transfers++;
@@ -233,6 +315,12 @@ static void FrameComplete(void)
     __DMB();
     published = next;
     state = IDLE;
+#ifdef ENCODER_TIMING_PROBE
+    if (probe_pending && probe.request == start_cycles) {
+      probe.new_seq=sample->sequence;
+      probe.publish=DWT->CYCCNT;
+    }
+#endif
     __set_PRIMASK(mask);
     return;
   }
@@ -248,6 +336,9 @@ bool AS5047P_GetSample(AS5047P_Sample *sample)
   bool good = diagnostic_ok;
   uint32_t diag_time = diagnostic_ms;
   __set_PRIMASK(mask);
+#ifdef ENCODER_TIMING_PROBE
+  ProbeUse(sample);
+#endif
   uint32_t now = HAL_GetTick();
   sample->valid = sample->valid && good && sample->sequence != 0U &&
     (uint32_t)(now - sample->updated_ms) < MOTOR_CONTROL_ENCODER_STALE_MS &&
@@ -312,6 +403,20 @@ static bool Equals(const char *text, const char *expected)
 bool AS5047P_ProcessCommand(const char *command)
 {
   if (command == NULL) return false;
+#ifdef ENCODER_TIMING_PROBE
+  if (Equals(command, "angle timing arm")) {
+    uint32_t mask=__get_PRIMASK(); __disable_irq();
+    probe_armed=false; probe_pending=false; probe_ready=false;
+    probe=(TimingProbe){0};
+    probe_req_irq=probe_resp_irq=probe_decode=probe_adc=0;
+    probe_received=0;
+    probe_use_time=probe_use_seq=probe_use_request=0;
+    probe_armed=true;
+    __set_PRIMASK(mask);
+    printf("TIMING armed\r\n"); return true;
+  }
+  if (Equals(command, "angle timing dump")) { ProbeDump(); return true; }
+#endif
   if (Equals(command, "angle") || Equals(command, "angle start")) {
     streaming = true; report_ms = HAL_GetTick() - 100U;
     printf("Angle display started: elec_uncal is before direction/offset correction (not calibration status). Check 'cal status'.\r\n");

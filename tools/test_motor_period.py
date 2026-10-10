@@ -41,6 +41,9 @@ def test(path):
         assert f.call('MotorControl_SetVoltage', floats=(0, vd, 0, 24)) == 1
         actual = struct.unpack('<3I', f.uc.mem_read(f.symbols['voltage_compare'], 12))
         assert actual == expected, (actual, expected)
+        assert f.call('MotorControl_SetVoltageSinCos', floats=(0, 1, vd, 0, 24)) == 1
+        actual = struct.unpack('<3I', f.uc.mem_read(f.symbols['voltage_compare'], 12))
+        assert actual == expected, (actual, expected)
     put(0x40012C2C, 0)
     assert f.call('MotorControl_Init', f.symbols['htim1'], f.CONFIG) == 1
     print(f'PASS: 50 us, zero/nonzero voltage compares, ARR=0 rejection: {path}')

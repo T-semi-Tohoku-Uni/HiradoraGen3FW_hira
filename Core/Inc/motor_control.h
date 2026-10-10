@@ -72,6 +72,8 @@ bool MotorControl_IsVoltageMode(void);
 float MotorControl_GetPeriodSeconds(void);
 HAL_StatusTypeDef MotorControl_StartVoltage(void);
 bool MotorControl_SetVoltage(float angle, float vd, float vq, float vm);
+/* FOC: reuse the current ADC observation's sine/cosine pair. */
+bool MotorControl_SetVoltageSinCos(float s, float c, float vd, float vq, float vm);
 
 
 #ifdef __cplusplus

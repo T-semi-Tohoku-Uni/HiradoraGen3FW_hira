@@ -584,10 +584,12 @@ state（2=要求、3=応答）、経過時間ns、SPI SR、DMA残数とフラグ
 `none`でもFOC側の角度鮮度制限で停止することがあります。`foc status`も併せて確認してください。
 
 
-ISR時間調査には、PWM停止中に`angle trace`で予約し、次の`foc start`で記録を開始します。
-256イベントで記録を終了し、`stop`後に`angle trace dump`で読み出します。
-TIM/ADC/RX DMA入口・出口等のサイクル時刻を出力します。計測自体の負荷があります。
-再度`angle trace`を送ると以前の記録を消去します。通常は予約せず使用してください。
+旧`angle trace` / `angle trace dump`は現行の通常DMAコードにはありません。
+調査専用の`ENCODER_TIMING_PROBE`定義ビルドでは、`angle timing arm`で
+ADC内からの最初のDECODING待ちと、その後の公開・次ADC使用をRAMへ記録します。
+`stop`後に`angle timing dump`で時刻を読み出します。再armで以前の記録を消去します。
+通常ビルドにはコマンドも記録処理も含まれません。計測の負荷で発生頻度は変わります。
+時刻形式・制約・実測は[待ちタイミング調査](encoder_wait_timing_2026-10-10.md)を参照。
 
 FOC中の`adc` / `adc 100`には、相電流と同じ周期の`id_a`・`iq_a`・`elec_rad`も出力します。
 単位・角度の意味は[DMAロガー](dma_logger.md)を参照してください。電流PIの指令・設定は[電流PI](current_pi.md)を参照してください。

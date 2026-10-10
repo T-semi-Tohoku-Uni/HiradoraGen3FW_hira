@@ -11,13 +11,27 @@ float VoltageVector_Wrap(float angle)
  * CMSIS側は度単位なので、有限のラジアンを1回転内へ正規化してから渡す。 */
 void VoltageVector_SinCos(float angle, float *s, float *c)
 {
-  float wrapped = VoltageVector_Wrap(angle);
-  arm_sin_cos_f32(wrapped * (360.0f / TWO_PI), s, c);
+  VoltageVector_SinCosWrapped(VoltageVector_Wrap(angle), s, c);
+}
+void VoltageVector_SinCosWrapped(float angle, float *s, float *c)
+{
+  /* Wrap can round a tiny negative remainder + 2*pi to exactly 2*pi.
+   * Match the previous second fmodf at that endpoint. */
+  if (angle == TWO_PI) angle = 0.0f;
+  arm_sin_cos_f32(angle * (360.0f / TWO_PI), s, c);
 }
 bool VoltageVector_Compute(float angle, float vd, float vq, float vm,
                            float limit, float margin, float duty[3])
 {
-  if (!duty || !isfinite(angle) || !isfinite(vd) || !isfinite(vq) ||
+  if (!isfinite(angle)) return false;
+  float s, c;
+  VoltageVector_SinCos(angle, &s, &c);
+  return VoltageVector_ComputeSinCos(s, c, vd, vq, vm, limit, margin, duty);
+}
+bool VoltageVector_ComputeSinCos(float s, float c, float vd, float vq, float vm,
+                                float limit, float margin, float duty[3])
+{
+  if (!duty || !isfinite(s) || !isfinite(c) || !isfinite(vd) || !isfinite(vq) ||
       !isfinite(vm) || !isfinite(limit) || !isfinite(margin) ||
       vm <= 0.0f || limit <= 0.0f || margin < 0.0f || margin >= 0.5f) return false;
   /* 円形制限でVd:Vqを保つ。線形SVPWM領域とbootstrap用余白の両方を守る。 */
@@ -27,8 +41,6 @@ bool VoltageVector_Compute(float angle, float vd, float vq, float vm,
   float maximum = vm * (1.0f - 2.0f * margin) / 1.732050808f;
   if (maximum > limit) maximum = limit;
   if (magnitude > maximum) { float scale = maximum / magnitude; vd *= scale; vq *= scale; }
-  float c, s;
-  VoltageVector_SinCos(angle, &s, &c);
   float alpha = vd * c - vq * s, beta = vd * s + vq * c;
   float u = alpha, v = -0.5f * alpha + 0.866025404f * beta;
   float w = -0.5f * alpha - 0.866025404f * beta;

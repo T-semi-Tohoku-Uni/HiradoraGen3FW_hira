@@ -18,11 +18,14 @@ CubeMX再生成と書き込みが終わるまでは、実機テストを実行�
 | `test_h2_calibration.py` | H2校正・保存形式 |
 | `test_cal_map.py` | 校正・異常時の停止 |
 | `test_motor_period.py` | TIM1の50 µs周期・CCR計算 |
+| `test_foc_trig.py` | 変更前ELFとのPWM一致、同一ADC周期のsin/cos共有、呼出し回数、無効観測の拒否 |
+| `test_encoder_request_order.py` | 角度コピー後の取得開始、周期末尾との重複防止、起動準備中の取得、無効/古い角度の拒否 |
 
 ```powershell
 $env:PYTHONPATH='build/encoder_test_deps;tools'
 python tools/test_motor_period.py build/Debug/HiradoraGen3FW.elf build/Release/HiradoraGen3FW.elf
 python tools/test_current_pi.py build/Debug/HiradoraGen3FW.elf build/Release/HiradoraGen3FW.elf
+python tools/test_foc_trig.py build/foc_before_trig_20261009.elf build/Debug/HiradoraGen3FW.elf build/Release/HiradoraGen3FW.elf
 ```
 
 実ELFのARM命令を実行するが、電気的なSPI波形・実際の割り込み遅延は対象外。
@@ -50,6 +53,10 @@ powershell -NoProfile -File tools/check_encoder_stopped.ps1 -Port COM6
 ```
 
 ## 保存済みログの解析
+
+`analyze_encoder_timing_probe.py <log>...`は調査ビルドの`angle timing dump`を解析する。
+要求時刻基準のµsへ変換し、ADC/DMA同時active、公開前後の角度sequence対応を検証する。
+通常FWの待ち頻度を測るツールではない。詳細は`docs/encoder_wait_timing_2026-10-10.md`。
 
 `analyze_timing_log.py`、`analyze_current_observation.py`、`analyze_cal_map.py`、
 `analyze_pi_tuning.py`、`analyze_pi_endurance.py`、`analyze_h2_endurance.py` を残した。

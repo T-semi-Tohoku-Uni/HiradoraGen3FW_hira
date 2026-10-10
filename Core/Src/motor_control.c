@@ -996,11 +996,8 @@ HAL_StatusTypeDef MotorControl_StartVoltage(void)
   __set_PRIMASK(mask);
   return HAL_OK;
 }
-bool MotorControl_SetVoltage(float angle, float vd, float vq, float vm)
+static bool MotorControl_SetVoltageDuty(const float duty[3])
 {
-  float duty[3];
-  if (!VoltageVector_Compute(angle, vd, vq, vm, MOTOR_CONTROL_VOLTAGE_LIMIT,
-                             MOTOR_CONTROL_PWM_MARGIN, duty)) return false;
   uint32_t compare[3];
   for (unsigned i=0; i<3; i++) compare[i] = (uint32_t)(duty[i] *
       (float)__HAL_TIM_GET_AUTORELOAD(motor_timer) + 0.5f);
@@ -1012,6 +1009,22 @@ bool MotorControl_SetVoltage(float angle, float vd, float vq, float vm)
   if (enabled) for (unsigned i=0; i<3; i++) voltage_compare[i] = compare[i];
   __set_PRIMASK(mask);
   return enabled;
+}
+
+bool MotorControl_SetVoltage(float angle, float vd, float vq, float vm)
+{
+  float duty[3];
+  if (!VoltageVector_Compute(angle, vd, vq, vm, MOTOR_CONTROL_VOLTAGE_LIMIT,
+                             MOTOR_CONTROL_PWM_MARGIN, duty)) return false;
+  return MotorControl_SetVoltageDuty(duty);
+}
+
+bool MotorControl_SetVoltageSinCos(float s, float c, float vd, float vq, float vm)
+{
+  float duty[3];
+  if (!VoltageVector_ComputeSinCos(s, c, vd, vq, vm, MOTOR_CONTROL_VOLTAGE_LIMIT,
+                                   MOTOR_CONTROL_PWM_MARGIN, duty)) return false;
+  return MotorControl_SetVoltageDuty(duty);
 }
 
 /* ADC完了から呼ぶFOC専用周期処理。CH4立上りは下降時のARR-1付近なので、
@@ -1040,7 +1053,9 @@ void MotorControl_FocAdcISR(void)
   __set_PRIMASK(mask);
   /* 出力を停止した後はmain側の低速取得に戻す。処理完了を監視側に通知する。 */
   if (MotorControl_IsVoltageMode()) {
-    AS5047P_Tick();
+    /* Running FOC requested after its angle copy. Arming still needs acquisition
+     * here, because CurrentISR returns before taking a control snapshot. */
+    if (!FocVoltage_IsRunning()) AS5047P_Tick();
     FocVoltage_AdcCompleteISR();
   }
 }
@@ -1050,6 +1065,9 @@ void MotorControl_FocAdcBeginISR(void)
 {
   if (!FocVoltage_IsActive()) return;
   foc_adc_began=DWT->CYCCNT;
+#ifdef ENCODER_TIMING_PROBE
+  AS5047P_TimingAdcBegin();
+#endif
   uint32_t arr=__HAL_TIM_GET_AUTORELOAD(motor_timer);
   foc_adc_cnt=__HAL_TIM_GET_COUNTER(motor_timer);
   foc_adc_down=(motor_timer->Instance->CR1 & TIM_CR1_DIR)!=0U;
