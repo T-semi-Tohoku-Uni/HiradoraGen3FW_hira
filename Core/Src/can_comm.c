@@ -42,6 +42,26 @@ static volatile uint32_t fifo_empty_ms;
 static volatile uint32_t stale_frames, prearm_frames;
 static uint16_t arm_timestamp;
 static volatile bool safety_stop;
+static volatile uint32_t control_cycles;
+static volatile bool foc_requested;
+
+/* PRIMASK保持中に呼ぶ。SysTickが遅れてもDWTで期限を失効させる。 */
+static void CheckDeadline(void)
+{
+  uint32_t before = safety.state;
+  CanSafety_Tick(&safety, HAL_GetTick());
+  if ((uint32_t)(DWT->CYCCNT - control_cycles) >= SystemCoreClock / 20U)
+    CanSafety_Trip(&safety, CAN_TRIP_TIMEOUT);
+  if (before != safety.state) safety_stop = true;
+}
+static bool ControlPermitted(void)
+{
+  uint32_t mask = __get_PRIMASK(); __disable_irq();
+  CheckDeadline();
+  bool permitted = safety.state == CAN_SAFE_READY && !stats.bus_off;
+  __set_PRIMASK(mask);
+  return permitted;
+}
 
 static void SafetyTrip(uint32_t reason)
 {
@@ -57,7 +77,7 @@ void CanComm_WatchdogISR(void)
   if (!ready) return;
   uint32_t mask = __get_PRIMASK(); __disable_irq();
   uint32_t before = safety.state;
-  CanSafety_Tick(&safety, HAL_GetTick());
+  CheckDeadline();
   if (before == CAN_SAFE_WAIT_ZERO || before == CAN_SAFE_READY) {
     if (HAL_GPIO_ReadPin(GPIOE, GPIO_PIN_15) == GPIO_PIN_RESET)
       CanSafety_Trip(&safety, CAN_TRIP_GATE);
@@ -66,7 +86,10 @@ void CanComm_WatchdogISR(void)
   bool stop = safety_stop;
   safety_stop = false;
   __set_PRIMASK(mask);
-  if (stop) MotorControl_Stop();
+  if (stop) {
+    if (foc_requested) FocVoltage_TripISR("CAN safety stop");
+    MotorControl_Stop();
+  }
 }
 
 static CanStats Snapshot(void)
@@ -106,7 +129,7 @@ void CanComm_Init(FDCAN_HandleTypeDef *handle)
   ready = true;
   fifo_empty_ms = HAL_GetTick();
   tx_ms = HAL_GetTick();
-  printf("CAN test: node=%u, 1Mbps, angle/rpm TX/10ms; control disconnected\r\n", CAN_NODE_ID);
+  printf("CAN: node=%u, 1Mbps, TX/10ms; explicit arm required\r\n", CAN_NODE_ID);
 }
 
 void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *handle, uint32_t flags)
@@ -146,6 +169,7 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *handle, uint32_t flags)
       stats.accepted++;
       stats.valid = true;
       uint32_t mask = __get_PRIMASK(); __disable_irq();
+      CheckDeadline();
       /* WAIT_ZEROは50msで失効するため、この差分比較ではtimestamp一周を跨がない。
        * アーム前に送信開始済みだったフレームを含め、古いゼロで許可しない。 */
       if (safety.state == CAN_SAFE_WAIT_ZERO &&
@@ -153,8 +177,9 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *handle, uint32_t flags)
         prearm_frames++;
       } else {
         uint32_t before = safety.state;
-        (void)CanSafety_Receive(&safety, current,
-            HAL_GetTick() - (age_us + 999U) / 1000U, HAL_GetTick());
+        if (CanSafety_Receive(&safety, current,
+            HAL_GetTick() - (age_us + 999U) / 1000U, HAL_GetTick()))
+          control_cycles = DWT->CYCCNT - age_us * (SystemCoreClock / 1000000U);
         if (before != CAN_SAFE_FAULT && safety.state == CAN_SAFE_FAULT) safety_stop = true;
       }
       __set_PRIMASK(mask);
@@ -195,6 +220,50 @@ void HAL_FDCAN_ErrorCallback(FDCAN_HandleTypeDef *handle)
   }
 }
 
+static void PrintStatus(bool capture)
+{
+  /* 運転中のmain監視期限を守るため、1ループにつき1行だけ表示する。 */
+  static unsigned line;
+  static CanStats s;
+  static FDCAN_ErrorCountersTypeDef counters;
+  static FDCAN_ProtocolStatusTypeDef protocol;
+  static CanSafety gate;
+  if (capture) {
+    s = Snapshot();
+    counters = (FDCAN_ErrorCountersTypeDef){0};
+    protocol = (FDCAN_ProtocolStatusTypeDef){0};
+    (void)HAL_FDCAN_GetErrorCounters(can, &counters);
+    (void)HAL_FDCAN_GetProtocolStatus(can, &protocol);
+    uint32_t mask = __get_PRIMASK(); __disable_irq();
+    gate = safety;
+    __set_PRIMASK(mask);
+    line = 1U; return;
+  }
+  if (!line) return;
+    if (line == 1U) printf("CAN test node=%u ready=%u bus_off=%u; TX=angle/rpm/10ms\r\n", CAN_NODE_ID, ready, s.bus_off);
+    else if (line == 2U) printf("CAN safety state=%lu reason=%lu raw=%ld age_ms=%lu stale=%lu prearm=%lu; PWM=arm-controlled\r\n",
+        (unsigned long)gate.state, (unsigned long)gate.reason, (long)gate.command,
+        (unsigned long)(HAL_GetTick()-gate.last_ms), (unsigned long)stale_frames, (unsigned long)prearm_frames);
+    else if (line == 3U) printf("CAN feedback angle=%u rpm=%d valid=%u/%u invalid_skip=%lu\r\n",
+        telemetry.angle, telemetry.rpm, angle_valid, telemetry.speed_valid, (unsigned long)telemetry_invalid);
+    else if (line == 4U) printf("CAN feedback Iq_raw=%d valid=%u board_temp=%u C valid=%u (not motor temp)\r\n",
+        feedback_iq, iq_valid, feedback_temperature, temperature_valid);
+    else if (line == 5U) printf("CAN RX=%lu own=%lu other=%lu invalid=%lu lost=%lu\r\n",
+        (unsigned long)s.rx, (unsigned long)s.accepted, (unsigned long)s.other,
+        (unsigned long)s.invalid, (unsigned long)s.lost);
+    else if (line == 6U) printf("CAN TX queued=%lu done=%lu skip=%lu fail=%lu errors=%lu flags=%08lX\r\n",
+        (unsigned long)tx_queued, (unsigned long)s.tx_done, (unsigned long)tx_skipped,
+        (unsigned long)tx_errors, (unsigned long)s.errors, (unsigned long)s.error_flags);
+    else if (line == 7U) printf("CAN bus TEC=%lu REC=%lu LEC=%lu last_error_LEC=%lu passive=%u warning=%u\r\n",
+        (unsigned long)counters.TxErrorCnt, (unsigned long)counters.RxErrorCnt,
+        (unsigned long)protocol.LastErrorCode, (unsigned long)s.last_error_lec, (unsigned)protocol.ErrorPassive,
+        (unsigned)protocol.Warning);
+    else if (line == 8U) printf("CAN last valid=%u raw=%d mA=%ld read_age_ms=%lu monitor_skipped=%lu\r\n",
+        s.valid, s.current, (long)((int32_t)s.current * 20000 / 16384),
+        (unsigned long)(HAL_GetTick() - s.last_ms), (unsigned long)monitor_skipped);
+  line = line == 8U ? 0U : line + 1U;
+}
+
 static void MonitorDone(bool success)
 {
   (void)success;
@@ -204,6 +273,25 @@ static void MonitorDone(bool success)
 void CanComm_Task(void)
 {
   if (!ready) return;
+  if (ControlPermitted()) {
+    if (!foc_requested) {
+      foc_requested = true;
+      if (!Foc_StartCurrent(ControlPermitted)) SafetyTrip(CAN_TRIP_FOC);
+    }
+    if (!Foc_IsHealthy()) SafetyTrip(CAN_TRIP_FOC);
+    if (ControlPermitted()) {
+      /* 最新指令の読出し〜公開の間はCAN IRQだけを止め、FOC周期は維持する。 */
+      uint32_t enabled = NVIC_GetEnableIRQ(FDCAN1_IT0_IRQn);
+      HAL_NVIC_DisableIRQ(FDCAN1_IT0_IRQn);
+      float iq = (float)safety.command * (20.0f / 16384.0f);
+      if (iq > MOTOR_CONTROL_CURRENT_REF_MAX_A) iq = MOTOR_CONTROL_CURRENT_REF_MAX_A;
+      if (iq < -MOTOR_CONTROL_CURRENT_REF_MAX_A) iq = -MOTOR_CONTROL_CURRENT_REF_MAX_A;
+      if (!Foc_SetCurrentTarget(0.0f, iq)) SafetyTrip(CAN_TRIP_FOC);
+      if (enabled) HAL_NVIC_EnableIRQ(FDCAN1_IT0_IRQn);
+    }
+  }
+  CanComm_WatchdogISR();
+  PrintStatus(false);
   uint32_t now = HAL_GetTick();
   /* FIFOが空だった時刻のみ更新し、未処理フレームの古さを隠さない。 */
   uint32_t irq_mask = __get_PRIMASK(); __disable_irq();
@@ -267,7 +355,7 @@ void CanComm_Task(void)
   CanStats copy = Snapshot();
   if (copy.rx == shown_rx) return;
   int length = snprintf(monitor_text, sizeof(monitor_text),
-      "CAN RX id=%03lX data=%02X %02X %02X %02X %02X %02X %02X %02X raw=%d (display only)\r\n",
+      "CAN RX id=%03lX data=%02X %02X %02X %02X %02X %02X %02X %02X raw=%d\r\n",
       (unsigned long)copy.last_id, copy.data[0], copy.data[1], copy.data[2], copy.data[3],
       copy.data[4], copy.data[5], copy.data[6], copy.data[7], copy.current);
   monitor_busy = true;
@@ -292,6 +380,8 @@ bool CanComm_ProcessCommand(const char *command)
     if (!strcmp(command, "stop") || !strcmp(command, "foc stop")) {
       uint32_t mask = __get_PRIMASK(); __disable_irq();
       CanSafety_Disarm(&safety); safety_stop = false;
+      if (foc_requested) FocVoltage_TripISR("CAN user stop");
+      foc_requested = false;
       __set_PRIMASK(mask);
       MotorControl_Stop();
       return false;
@@ -324,6 +414,8 @@ bool CanComm_ProcessCommand(const char *command)
       return true;
     }
     uint32_t enabled = NVIC_GetEnableIRQ(FDCAN1_IT0_IRQn);
+    SET_BIT(CoreDebug->DEMCR, CoreDebug_DEMCR_TRCENA_Msk);
+    SET_BIT(DWT->CTRL, DWT_CTRL_CYCCNTENA_Msk);
     HAL_NVIC_DisableIRQ(FDCAN1_IT0_IRQn);
     /* アーム以前にFIFOへ入ったフレームは採用しない。HAL呼出し中もFOC IRQは有効。 */
     bool drained = true;
@@ -338,50 +430,25 @@ bool CanComm_ProcessCommand(const char *command)
     if (armed) {
       arm_timestamp = HAL_FDCAN_GetTimestampCounter(can);
       fifo_empty_ms = HAL_GetTick(); safety_stop = false; stats.valid = false;
+      control_cycles = DWT->CYCCNT; foc_requested = false;
     }
     __set_PRIMASK(mask);
     if (enabled) HAL_NVIC_EnableIRQ(FDCAN1_IT0_IRQn);
-    printf(armed ? "CAN safety armed: send NEW zero within 50ms; PWM start NOT connected\r\n" :
+    printf(armed ? "CAN armed: NEW zero within 50ms starts PWM\r\n" :
                    "CAN arm rejected: already armed or RX busy\r\n");
   }
   else if (!strcmp(arg, "disarm")) {
     uint32_t mask = __get_PRIMASK(); __disable_irq();
     bool owned = safety.state != CAN_SAFE_DISARMED;
     CanSafety_Disarm(&safety); safety_stop = false;
+    if (owned && foc_requested) FocVoltage_TripISR("CAN disarm");
+    foc_requested = false;
     __set_PRIMASK(mask);
     if (owned) MotorControl_Stop();
-    printf("CAN disarmed; PWM start not connected\r\n");
+    printf("CAN disarmed\r\n");
   }
   else if (!strcmp(arg, "status") || !*arg) {
-    CanStats s = Snapshot();
-    FDCAN_ErrorCountersTypeDef counters = {0};
-    FDCAN_ProtocolStatusTypeDef protocol = {0};
-    (void)HAL_FDCAN_GetErrorCounters(can, &counters);
-    (void)HAL_FDCAN_GetProtocolStatus(can, &protocol);
-    uint32_t mask = __get_PRIMASK(); __disable_irq();
-    CanSafety gate = safety;
-    __set_PRIMASK(mask);
-    printf("CAN test node=%u ready=%u bus_off=%u; TX=angle/rpm/10ms\r\n", CAN_NODE_ID, ready, s.bus_off);
-    printf("CAN safety state=%lu reason=%lu raw=%ld age_ms=%lu stale=%lu prearm=%lu; PWM=start-disabled\r\n",
-        (unsigned long)gate.state, (unsigned long)gate.reason, (long)gate.command,
-        (unsigned long)(HAL_GetTick()-gate.last_ms), (unsigned long)stale_frames, (unsigned long)prearm_frames);
-    printf("CAN feedback angle=%u rpm=%d valid=%u/%u invalid_skip=%lu\r\n",
-        telemetry.angle, telemetry.rpm, angle_valid, telemetry.speed_valid, (unsigned long)telemetry_invalid);
-    printf("CAN feedback Iq_raw=%d valid=%u board_temp=%u C valid=%u (not motor temp)\r\n",
-        feedback_iq, iq_valid, feedback_temperature, temperature_valid);
-    printf("CAN RX=%lu own=%lu other=%lu invalid=%lu lost=%lu\r\n",
-        (unsigned long)s.rx, (unsigned long)s.accepted, (unsigned long)s.other,
-        (unsigned long)s.invalid, (unsigned long)s.lost);
-    printf("CAN TX queued=%lu done=%lu skip=%lu fail=%lu errors=%lu flags=%08lX\r\n",
-        (unsigned long)tx_queued, (unsigned long)s.tx_done, (unsigned long)tx_skipped,
-        (unsigned long)tx_errors, (unsigned long)s.errors, (unsigned long)s.error_flags);
-    printf("CAN bus TEC=%lu REC=%lu LEC=%lu last_error_LEC=%lu passive=%u warning=%u\r\n",
-        (unsigned long)counters.TxErrorCnt, (unsigned long)counters.RxErrorCnt,
-        (unsigned long)protocol.LastErrorCode, (unsigned long)s.last_error_lec, (unsigned)protocol.ErrorPassive,
-        (unsigned)protocol.Warning);
-    printf("CAN last valid=%u raw=%d mA=%ld read_age_ms=%lu monitor_skipped=%lu\r\n",
-        s.valid, s.current, (long)((int32_t)s.current * 20000 / 16384),
-        (unsigned long)(HAL_GetTick() - s.last_ms), (unsigned long)monitor_skipped);
+    PrintStatus(true);
   } else printf("Usage: can status|arm|disarm|monitor on|monitor off\r\n");
   return true;
 }

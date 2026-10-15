@@ -24,6 +24,7 @@ try {
   $u.Open();$a.Open();$u.DiscardInBuffer()
   $u.Write("stop`ncan disarm`ncan monitor off`n");Note (Pump 200)
   $u.Write("status`n");$text=Pump 100;Note $text;Check $text 'PWM: stopped, mode=off'
+  $text=Status 'REQUIRE DISCONNECTED PWM';Check ($text -join "`n") 'PWM=start-disabled'
   $a.Write("C`rS8`rO`r");$null=Pump 200
   $u.Write("can arm`n");Note (Pump 100)
   $text=Status 'NO FRAME TIMEOUT';Check ($text -join "`n") 'state=3 reason=1 raw=0'

@@ -22,6 +22,14 @@ bool FocVoltage_GetObservationISR(FocVoltage_Observation *observation);
 bool FocVoltage_GetIqSample(float *iq_a);
 bool FocVoltage_IsActive(void);
 bool FocVoltage_IsRunning(void); /* Distinguish arming from ADC control. */
+/* main専用。電流目標を同時更新する。PWM開始・fault解除は行わない。
+ * 非有限値、既存の電流ベクトル上限超過、校正中、運転中のモード変更、
+ * 停止処理前のfaultはfalseで拒否し、目標を保持する。
+ * スルーレートは既存ADC制御周期で適用。呼出元でUART/CAN所有権を管理する。 */
+bool Foc_SetCurrentTarget(float id_a, float iq_a);
+/* main専用。ゼロ電流でPWM開始。許可関数はTIM ISR/排他区間でも呼ぶ。 */
+bool Foc_StartCurrent(bool (*permitted)(void));
+bool Foc_IsHealthy(void);
 bool FocVoltage_ProcessCommand(const char *command);
 void FocVoltage_Task(void);
 void FocVoltage_ReportTask(void);

@@ -2,7 +2,7 @@
 #define CAN_COMM_H
 #include "stm32g4xx_hal.h"
 #include <stdbool.h>
-/* main専用。観測・安全状態の試験段階。CANからPWMを開始する経路はない。 */
+/* main専用。明示的なarmと新しいゼロ指令の後だけFOCを開始する。 */
 void CanComm_Init(FDCAN_HandleTypeDef *handle);
 void CanComm_Task(void);
 bool CanComm_ProcessCommand(const char *command);

@@ -4,7 +4,7 @@
 #include <stdint.h>
 enum { CAN_SAFE_DISARMED, CAN_SAFE_WAIT_ZERO, CAN_SAFE_READY, CAN_SAFE_FAULT };
 enum { CAN_TRIP_NONE, CAN_TRIP_TIMEOUT, CAN_TRIP_FIFO, CAN_TRIP_BUS_OFF,
-       CAN_TRIP_STALE, CAN_TRIP_GATE, CAN_TRIP_RX };
+       CAN_TRIP_STALE, CAN_TRIP_GATE, CAN_TRIP_RX, CAN_TRIP_FOC };
 typedef struct {
   uint32_t state, reason, last_ms;
   int32_t command;
