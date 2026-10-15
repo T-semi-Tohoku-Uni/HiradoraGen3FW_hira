@@ -47,6 +47,18 @@ static volatile int h2_gain = 1;
 static AS5047P_Sample cycle_angle;
 static uint32_t observation_adc_sequence, observation_adc_cycles;
 static bool observation_valid;
+bool FocVoltage_GetIqSample(float *iq_a)
+{
+  if (!iq_a) return false;
+  uint32_t mask = __get_PRIMASK(); __disable_irq();
+  bool valid = active && running && observation_valid && !fault &&
+      (uint32_t)(HAL_GetTick() - current_tick) <= 2U;
+  float iq = measured_q;
+  __set_PRIMASK(mask);
+  if (!valid || !isfinite(iq)) return false;
+  *iq_a = iq;
+  return true;
+}
 bool FocVoltage_GetObservationISR(FocVoltage_Observation *observation)
 {
   if (!observation_valid || !running || fault) return false;

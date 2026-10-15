@@ -51,6 +51,10 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
+    Core/Src/can_protocol.c
+    Core/Src/can_telemetry.c
+    Core/Src/can_safety.c
+    Core/Src/can_comm.c
     Drivers/CMSIS/DSP/Source/ControllerFunctions/arm_sin_cos_f32.c
     Drivers/CMSIS/DSP/Source/CommonTables/arm_common_tables.c
     Core/Src/foc_voltage.c
@@ -69,6 +73,20 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/ntc.c
     Core/Src/stspin32g4.c
 )
+
+# Add include paths
+# CAN追加分はDebugでもサイズを抑え、校正Flash領域を維持する。
+set_source_files_properties(Core/Src/can_comm.c Core/Src/can_protocol.c Core/Src/can_telemetry.c Core/Src/can_safety.c
+    PROPERTIES COMPILE_OPTIONS "-Os")
+# 初期化コードもサイズ優先。FOC演算/ADC/TIM/SPIの最適化設定は維持する。
+set_source_files_properties(Core/Src/main.c Core/Src/stm32g4xx_hal_msp.c Core/Src/console.c
+    PROPERTIES COMPILE_OPTIONS "-Os")
+set_source_files_properties(
+    ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_fdcan.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_i2c.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_uart.c
+    TARGET_DIRECTORY STM32_Drivers
+    PROPERTIES COMPILE_OPTIONS "-Os")
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE

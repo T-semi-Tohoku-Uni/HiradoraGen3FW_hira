@@ -18,6 +18,8 @@ typedef struct {
   uint32_t adc_callback_cycles, angle_request_cycles, angle_received_cycles;
 } FocVoltage_Observation;
 bool FocVoltage_GetObservationISR(FocVoltage_Observation *observation);
+/* main専用。停止・異常・古い観測はfalse。電流PIを変更しない読み取りAPI。 */
+bool FocVoltage_GetIqSample(float *iq_a);
 bool FocVoltage_IsActive(void);
 bool FocVoltage_IsRunning(void); /* Distinguish arming from ADC control. */
 bool FocVoltage_ProcessCommand(const char *command);
