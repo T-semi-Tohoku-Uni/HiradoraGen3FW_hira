@@ -1,8 +1,9 @@
-param([ValidateRange(0,4096)][int]$Raw=0,[string]$Log='build/can_drive_hardware.log',[switch]$Steps,[switch]$LoadSteps)
+param([ValidateRange(0,4096)][int]$Raw=0,[string]$Log='build/can_drive_hardware.log',[switch]$Steps,[switch]$LoadSteps,[switch]$DropUnderLoad,[switch]$Reverse)
 # This script STARTS PWM. Notify the operator before running it.
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 if($Steps -and $LoadSteps){throw 'Select Steps or LoadSteps'}
+if(($DropUnderLoad -or $Reverse) -and !$LoadSteps){throw 'DropUnderLoad/Reverse requires LoadSteps'}
 $peakLimit=if($LoadSteps -or $Raw -gt 1638){7000}else{3000}
 Add-Type -TypeDefinition @'
 using System;
@@ -59,14 +60,14 @@ function Cmd([string]$cmd,[string]$frame='') {
   $writer.WriteLine('# '+$cmd);$u.Write($cmd+"`n");return (Pump 150 $frame)
 }
 function Check([string]$s,[string]$pattern){if($s -notmatch $pattern){throw "Missing $pattern in $s"}}
-function Running([string]$frame,[int]$ExpectedMa=-1) {
+function Running([string]$frame,[int]$ExpectedMa=[int]::MinValue) {
   $s=Cmd 'foc status' $frame;Note $s
   Check $s 'FOC: running';Check $s 'fault=none'
   if($s -notmatch 'rpm=(-?\d+)'){throw 'Missing speed'}
   if([math]::Abs([int]$Matches[1]) -gt 450){throw 'Host speed limit'}
   if($s -notmatch 'peak=(\d+) mA'){throw 'Missing current'}
   if([int]$Matches[1] -gt $peakLimit){throw 'Host current limit'}
-  if($ExpectedMa -ge 0) {
+  if($ExpectedMa -ne [int]::MinValue) {
     Check $s "FOC PI: target=0/$ExpectedMa mA, ref=0/$ExpectedMa mA"
     if($s -notmatch 'FOC current: id=(-?\d+) iq=(-?\d+) mA'){throw 'Missing dq current'}
     if([math]::Abs([int]$Matches[2]-$ExpectedMa) -gt 300){throw 'Iq tracking error exceeds 300 mA'}
@@ -90,8 +91,10 @@ try {
   if($Steps -or $LoadSteps) {
     # Verify settled targets and measured Iq across positive steps and zero return.
     $stepValues=if($LoadSteps){@(1638,2458,3277,4096,0)}else{@(410,819,1638,0)}
+    if($DropUnderLoad){$stepValues=@(1638,2458,3277,4096)}
     foreach($stepRaw in $stepValues) {
-      $command='t2008'+$stepRaw.ToString('X4')+'000000000000'
+      if($Reverse){$stepRaw=-$stepRaw}
+      $command='t2008'+($stepRaw -band 65535).ToString('X4')+'000000000000'
       $expected=[int][math]::Truncate($stepRaw*20000.0/16384)
       Note "STEP raw=$stepRaw expected_mA=$expected"
       $null=Pump 120 $command
@@ -106,9 +109,9 @@ try {
   $s=Cmd 'can status';Note $s;Check $s 'state=3 reason=1 raw=0'
   $s=Cmd 'status';Note $s;Check $s 'PWM: stopped, mode=off'
   $s=Cmd 'foc status';Note $s;Check $s 'FOC: off'
-  $null=Pump 200 $zero
-  $s=Cmd 'can status' $zero;Note $s;Check $s 'state=3 reason=1'
-  $s=Cmd 'status' $zero;Note $s;Check $s 'PWM: stopped, mode=off'
+  $null=Pump 200 $command
+  $s=Cmd 'can status' $command;Note $s;Check $s 'state=3 reason=1'
+  $s=Cmd 'status' $command;Note $s;Check $s 'PWM: stopped, mode=off'
   # Explicit re-arm permits a second zero-current start, then disarm stops it.
   Note (Cmd 'can arm' $zero);Running $zero
   Note (Cmd 'can disarm' $zero)

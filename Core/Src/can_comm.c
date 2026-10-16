@@ -13,6 +13,9 @@
 #include <string.h>
 #include <ctype.h>
 
+/* フィードバックは1msに統一。CubeMX設定とは独立。 */
+#define CAN_FEEDBACK_PERIOD_MS 1U
+
 typedef struct {
   uint32_t rx, accepted, invalid, other, lost, tx_done, errors, error_flags;
   uint32_t last_ms, last_id;
@@ -129,7 +132,7 @@ void CanComm_Init(FDCAN_HandleTypeDef *handle)
   ready = true;
   fifo_empty_ms = HAL_GetTick();
   tx_ms = HAL_GetTick();
-  printf("CAN: node=%u, 1Mbps, TX/10ms; explicit arm required\r\n", CAN_NODE_ID);
+  printf("CAN: node=%u, 1Mbps, TX/%ums; explicit arm required\r\n", CAN_NODE_ID, CAN_FEEDBACK_PERIOD_MS);
 }
 
 void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *handle, uint32_t flags)
@@ -240,7 +243,7 @@ static void PrintStatus(bool capture)
     line = 1U; return;
   }
   if (!line) return;
-    if (line == 1U) printf("CAN test node=%u ready=%u bus_off=%u; TX=angle/rpm/10ms\r\n", CAN_NODE_ID, ready, s.bus_off);
+    if (line == 1U) printf("CAN test node=%u ready=%u bus_off=%u; TX=angle/rpm/%ums\r\n", CAN_NODE_ID, ready, s.bus_off, CAN_FEEDBACK_PERIOD_MS);
     else if (line == 2U) printf("CAN safety state=%lu reason=%lu raw=%ld age_ms=%lu stale=%lu prearm=%lu; PWM=arm-controlled\r\n",
         (unsigned long)gate.state, (unsigned long)gate.reason, (long)gate.command,
         (unsigned long)(HAL_GetTick()-gate.last_ms), (unsigned long)stale_frames, (unsigned long)prearm_frames);
@@ -306,7 +309,7 @@ void CanComm_Task(void)
     CanTelemetry_Update(&telemetry, sample.raw, sample.request_cycles, SystemCoreClock);
     telemetry_sequence = sample.sequence;
   }
-  if ((uint32_t)(now - tx_ms) >= 10U) {
+  if ((uint32_t)(now - tx_ms) >= CAN_FEEDBACK_PERIOD_MS) {
     tx_ms = now;
     float iq = 0, temperature = 0;
     iq_valid = FocVoltage_GetIqSample(&iq);

@@ -1,5 +1,7 @@
 # CAN→FOC接続と実機試験（2026-10-16）
 
+**最新状態：フィードバックを1msへ統一し、10ms選択肢とCPU占有率測定コードを削除済み。** 実機には直前の計測OFF通常Debug版を書き込み済みで、最終確認時はPWM停止・CAN未アーム。計測コード削除後の実機書き込みは行っていない。正逆5A試験と占有率計測は末尾および[CPU占有率記録](cpu_profile_test.md)を参照。以下の10ms版・選択設定の説明は当時の試験記録。
+
 ## 現在の動作
 
 起動時はDISARMEDでPWM停止。`can arm`後50ms以内の新しいゼロ指令で、mainから`Foc_StartCurrent`を呼び、Id=Iq=0AでPWMを開始する。**ゼロ指令でも通電する。** 以後、自ノードのCAN指令を±16384→±20Aに換算し、既存の±15A上限へ制限して`Foc_SetCurrentTarget(0, iq)`へ渡す。既存の60A/sスルーレート、相電流20A保護、1000rpm速度保護を維持した。
@@ -78,3 +80,44 @@ COM6でVM=24.260V、校正VALID、nFAULT HIGH、エンコーダー通信正常�
 最大計測値はcompute=12.768µs、ADC control=28.243µs、angle age=111.218µs。指令送信中の予期しない保護停止はなく、送信を意図的に止めると通信期限で停止した。自動復帰禁止、明示再アーム、disarm停止も合格。終了時はPWM stopped/FOC off/CAN state=0。
 
 これで低速回転中の正方向電流指令を確認した。5Aを流したままの通信途絶、逆転、上限電流、長時間運転、1kHzフィードバックは未検証。
+
+## 正逆5A通電中の通信途絶（追加検証）
+
+PWM開始前に各条件を通知し、`-LoadSteps -DropUnderLoad`で2→3→4→5Aまで上げ、ゼロへ戻さずCAN送信を停止した。逆方向は`-Reverse`を追加して−2→−5Aで同じ試験を行った。符号付き16bitの負電流は2の補数で送信する。停止後も直前の非ゼロ指令を再送し、自動再始動しないことを確認した。
+
+| 10ms版のログ | 5A段階の実Iq | 速度表示 | 相電流ピーク |
+|---|---|---|---|
+| `build/can_drive_drop_5a.log` | 4.960〜5.136A | 109〜117rpm | 5.465A |
+| `build/can_drive_reverse_drop_5a.log` | −4.992〜−4.906A | −125〜−112rpm | 5.537A |
+
+両方とも通信期限FAULT、PWM停止、非ゼロ再送時の再始動禁止、明示再アーム、disarm停止に合格。逆方向は停止から起動しており、回転中の正負反転ではない。
+
+## 1msフィードバックの検証
+
+CMakeの`CAN_FEEDBACK_PERIOD_MS`で1/10msを選択できるようにした。既定値10msを維持。例：構成時に`-DCAN_FEEDBACK_PERIOD_MS=1`を指定する。CubeMX設定は変更していない。
+
+初回は周期だけ変更しても約492Hzだった。main末尾の`HAL_Delay(1)`が、このHAL実装では1tick追加して待つため約2ms周期になっていた。1msビルドに限り`HAL_Delay(0)`で次のtickまで待つ形にした。変更はUSER CODE内で、10ms版の待機は従来のまま。後にユーザーからもHAL_Delay変更の許可を受けた。
+
+10ms/1msそれぞれDebug/Releaseのビルドと既存10種類のモデル試験に合格した。その後のmain待機値修正でも4構成をビルドし、1ms版を実機で再検証した。1ms DebugはFlash=128176 byte、RAM=15744 byte、ReleaseはFlash=115536 byte、RAM=15736 byte。校正Flashは保持した。
+
+停止状態の測定：`build/can_feedback_1ms_stopped_fixed.log`。5008.1msで4979フレーム、PC受信集計で約994Hz。角度範囲・予約byte・停止中Iqを検査して合格。USB受信はまとめて届くため、host_max_gap=34.5msはCANバス上の最大間隔ではない。1msごとの厳密な送信保証もしていない。
+
+1ms版の実機試験もすべて合格：
+
+| ログ | 5A段階の実Iq | 速度表示 |
+|---|---|---|
+| `build/can_drive_1ms_zero.log` | ゼロ電流試験 | ほぼ静止 |
+| `build/can_drive_1ms_drop_5a.log` | 4.897〜5.063A | 108〜118rpm |
+| `build/can_drive_1ms_reverse_drop_5a.log` | −5.179〜−4.916A | −126〜−119rpm |
+
+正逆とも相電流ピークは表示で5.366A。通電中の通信停止、非ゼロ指令再送時の再始動禁止、再アーム、disarm停止を確認した。現在の実機は`build/can_1ms_debug/HiradoraGen3FW.elf`で、最終状態はPWM stopped/FOC off/CAN state=0。
+
+### 処理時間・通信負荷の評価と限界
+
+1ms版の負荷試験で観測された最大値はcompute=12.600µs、ADC control=28.037µs、angle age=111.362µs。直前の10ms版5A試験ではADC control最大28.243µs。今回の短時間条件で処理時間の明確な悪化や期限超過は観測しなかった。ただし計測区間の最大値であり、CPU全体の平均占有率ではない。CAN/main/SPIを含むCPU占有率の定量測定、長時間の最悪値評価は未実施。
+
+標準ID・Classic CAN・8byteをフレーム間隔込みで約111〜135bit/フレームと見積もると、1台の1kHzフィードバックは1Mbpsバスの約11.1〜13.5%を使用する。指令も1kHzなら1台で合計約22.2〜27.0%。8台が1kHzで応答し、2グループの指令も各1kHzなら約111〜135%となり、1Mbpsには収まらない。複数台では周期・位相・指令頻度の設計が必要。エラー/再送等はこの概算に含まない。
+
+今回のPC指令送信はWindows/USBで約5〜16ms間隔の試験用送信であり、指令自体を1kHzで送る負荷試験ではない。Bit1エラーは継続。正方向1ms試験の開始status〜運転中statusではqueuedが4467増、errorsが92増、skip増加なし。逆方向ではqueuedが4399増、errorsが71増、skipが10増えた。少なくともこの条件では無欠落通信を達成していない。累積エラーにはアダプター閉鎖中のACKなしも含まれるため、比較は測定区間の差分で行う。
+
+残る検証は回転中の方向反転、上限電流、長時間運転、運転中のbus-off/FIFO overflow/nFAULT注入、物理的な50ms停止時間、CPU全体の占有率、複数ノードや1kHz指令を含む負荷評価。

@@ -273,7 +273,7 @@ int main(void)
   }
   AS5047P_Init(&hspi1, &htim1);
   MotorCalibration_Init();
-  CanComm_Init(&hfdcan1); /* CAN単独試験。PWM/FOCには接続しない。 */
+  CanComm_Init(&hfdcan1); /* CAN駆動は明示armと新しいゼロ指令を必要とする。 */
   printf("Command: <offset>, u/v/w <offset>, mid, stop, start, "
          "run cw/ccw <rpm>, status, adc [decimation], adc stop, adc status, vm, ntc, ntc stop, angle, angle stop, angle status, serial status, foc voltage/start/status/stop, cal start/status/stop/save, fault, fault clear\r\n");
   /* USER CODE END 2 */
@@ -329,7 +329,8 @@ int main(void)
         (void)MotorControl_ProcessCommand(motor_command);
       }
     }
-    HAL_Delay(1);
+    /* HALは1tickを追加して待つ。0指定で次のtickまで待機する。 */
+    HAL_Delay(0);
   }
   /* USER CODE END 3 */
 }
