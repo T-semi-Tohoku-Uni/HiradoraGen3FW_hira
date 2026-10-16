@@ -17,6 +17,12 @@
 #define TWO_PI (2.0f*PI)
 static volatile bool active, running, adc_seen;
 static const char *volatile fault;
+/* mainで設定し、TIM監視と起動時に参照する外部制御の許可。 */
+static bool (*control_permitted)(void);
+static bool StartPermitted(void)
+{
+  return active && !fault && (!control_permitted || control_permitted());
+}
 static CalibrationRecord calibration;
 static volatile float target_d, target_q, applied_d, applied_q;
 typedef enum { VOLTAGE_CONTROL_MODE = 0, CURRENT_CONTROL_MODE } FocControlMode;
@@ -47,6 +53,18 @@ static volatile int h2_gain = 1;
 static AS5047P_Sample cycle_angle;
 static uint32_t observation_adc_sequence, observation_adc_cycles;
 static bool observation_valid;
+bool FocVoltage_GetIqSample(float *iq_a)
+{
+  if (!iq_a) return false;
+  uint32_t mask = __get_PRIMASK(); __disable_irq();
+  bool valid = active && running && observation_valid && !fault &&
+      (uint32_t)(HAL_GetTick() - current_tick) <= 2U;
+  float iq = measured_q;
+  __set_PRIMASK(mask);
+  if (!valid || !isfinite(iq)) return false;
+  *iq_a = iq;
+  return true;
+}
 bool FocVoltage_GetObservationISR(FocVoltage_Observation *observation)
 {
   if (!observation_valid || !running || fault) return false;
@@ -130,6 +148,26 @@ static const char *CurrentConfigError(void)
     return "CURRENT_MAX_VOLTS must be finite, > 0 and <= VOLTAGE_LIMIT";
   return NULL;
 }
+bool Foc_SetCurrentTarget(float id_a, float iq_a)
+{
+  /* 浮動小数点検査は割り込み禁止区間の外で行う。超過値は暗黙に丸めない。 */
+  if (!isfinite(id_a) || !isfinite(iq_a) ||
+      hypotf(id_a,iq_a)>MOTOR_CONTROL_CURRENT_REF_MAX_A ||
+      CurrentConfigError() || !ConfigValid() || MotorCalibration_IsActive()) return false;
+  uint32_t mask=__get_PRIMASK(); __disable_irq();
+  /* 検査中に保護ISRが停止した場合もここで拒否。Id/Iqの片側だけをISRへ渡さない。 */
+  if (active && (control_mode!=CURRENT_CONTROL_MODE || fault ||
+      (control_permitted && !control_permitted()))) {
+    __set_PRIMASK(mask);
+    return false;
+  }
+  if (!active) ResetCurrentControl();
+  control_mode=CURRENT_CONTROL_MODE;
+  current_target_d=id_a; current_target_q=iq_a;
+  target_d=target_q=0.0f;
+  __set_PRIMASK(mask);
+  return true;
+}
 static bool UpdateCurrentControl(void)
 {
   /* Slew along the reference vector so intermediate references stay in the
@@ -153,6 +191,9 @@ static bool UpdateCurrentControl(void)
 void FocVoltage_WatchdogISR(void)
 {
   if (!active || fault) return;
+  if (control_permitted && !control_permitted()) {
+    FocVoltage_TripISR("external control expired"); return;
+  }
   uint32_t now=HAL_GetTick();
   /* bootstrap/I2C準備中にはまだADCを開始していない。最初の有効ADCまで
    * 開始用期限で監視し、運転中の2ms監視を誤適用しない。 */
@@ -341,6 +382,57 @@ void FocVoltage_Task(void)
     } else if ((uint32_t)(now-started_ms)>10U) FocVoltage_TripISR("acquisition start timeout");
   }
 }
+static bool Start(bool (*permitted)(void))
+{
+    if (active || MotorCalibration_IsActive() || !MotorControl_IsStopped() || CurrentSense_IsBusy()) {
+      printf("FOC start blocked: stop PWM/calibration/ADC log first\r\n"); return false;
+    }
+    AS5047P_Sample sample; BusVoltageSample vm;
+    const char *config_error=CurrentConfigError();
+    if (control_mode==CURRENT_CONTROL_MODE && config_error) {
+      printf("FOC start blocked: config: %s\r\n",config_error); return false;
+    }
+    control_period=MotorControl_GetPeriodSeconds();
+    if (!ConfigValid() || (control_mode==CURRENT_CONTROL_MODE &&
+        (!isfinite(control_period) || control_period<=0.0f)) ||
+        !MotorCalibration_Get(&calibration) ||
+        !AS5047P_GetSample(&sample) || !BusVoltage_GetSample(&vm) || vm.overvoltage ||
+        vm.volts<MOTOR_CONTROL_VM_MIN_VOLTS || !isfinite(vm.volts)) {
+      printf("FOC start blocked: config/calibration/encoder/VM invalid\r\n"); return false;
+    }
+    if (!still_tracking || (uint32_t)(HAL_GetTick()-still_since)<MOTOR_CONTROL_FOC_STANDSTILL_MS) {
+      printf("FOC start blocked: wait for stationary rotor\r\n"); return false;
+    }
+    if (control_mode==VOLTAGE_CONTROL_MODE && target_q==0.0f) {
+      printf("Set nonzero Vq with foc voltage <Vd> <Vq> first\r\n"); return false;
+    }
+    control_permitted=permitted;
+    if (permitted && !permitted()) return false;
+    ResetCurrentControl();
+    observation_valid=false;
+    fault=NULL; active=true; running=false; adc_seen=false; adc_completed=false;
+    applied_d=applied_q=peak=rpm=measured_d=measured_q=0.0f;
+    ticks=compute_max=total_max=age_max=reverse_since=0;
+    angle_sequence=sample.sequence; vm_cache=vm.volts;
+    current_tick=heartbeat=started_ms=HAL_GetTick();
+    if (MotorControl_StartVoltageGuarded(StartPermitted)!=HAL_OK || !StartPermitted() ||
+        CurrentSense_BeginControl()!=HAL_OK || !StartPermitted()) {
+      FocVoltage_TripISR("PWM/ADC start failed"); return false;
+    }
+    current_tick=heartbeat=started_ms=HAL_GetTick();
+    if (control_mode==CURRENT_CONTROL_MODE)
+      printf("FOC current start: reference ramp from 0 A, phase trip=%ld mA\r\n",
+          (long)(MOTOR_CONTROL_CURRENT_LIMIT_A*1000));
+    else printf("FOC voltage start: ramp from 0 V, current limit %.2f A\r\n",(double)MOTOR_CONTROL_CURRENT_LIMIT_A);
+  return true;
+}
+bool Foc_StartCurrent(bool (*permitted)(void))
+{
+  /* CAN起動は常にゼロから。既存の校正/静止/電源/角度検査を共有する。 */
+  if (!permitted || active || !Foc_SetCurrentTarget(0.0f,0.0f)) return false;
+  return Start(permitted);
+}
+bool Foc_IsHealthy(void) { return active && !fault; }
 static void PrintStatus(bool capture)
 {
   static unsigned line;
@@ -419,43 +511,7 @@ bool FocVoltage_ProcessCommand(const char *command)
   }
   else if (Same(arg,"stop")) FocVoltage_TripISR("user stop");
   else if (Same(arg,"start")) {
-    if (active || MotorCalibration_IsActive() || !MotorControl_IsStopped() || CurrentSense_IsBusy()) {
-      printf("FOC start blocked: stop PWM/calibration/ADC log first\r\n"); return true;
-    }
-    AS5047P_Sample sample; BusVoltageSample vm;
-    const char *config_error=CurrentConfigError();
-    if (control_mode==CURRENT_CONTROL_MODE && config_error) {
-      printf("FOC start blocked: config: %s\r\n",config_error); return true;
-    }
-    control_period=MotorControl_GetPeriodSeconds();
-    if (!ConfigValid() || (control_mode==CURRENT_CONTROL_MODE &&
-        (!isfinite(control_period) || control_period<=0.0f)) ||
-        !MotorCalibration_Get(&calibration) ||
-        !AS5047P_GetSample(&sample) || !BusVoltage_GetSample(&vm) || vm.overvoltage ||
-        vm.volts<MOTOR_CONTROL_VM_MIN_VOLTS || !isfinite(vm.volts)) {
-      printf("FOC start blocked: config/calibration/encoder/VM invalid\r\n"); return true;
-    }
-    if (!still_tracking || (uint32_t)(HAL_GetTick()-still_since)<MOTOR_CONTROL_FOC_STANDSTILL_MS) {
-      printf("FOC start blocked: wait for stationary rotor\r\n"); return true;
-    }
-    if (control_mode==VOLTAGE_CONTROL_MODE && target_q==0.0f) {
-      printf("Set nonzero Vq with foc voltage <Vd> <Vq> first\r\n"); return true;
-    }
-    ResetCurrentControl();
-    observation_valid=false;
-    fault=NULL; active=true; running=false; adc_seen=false; adc_completed=false;
-    applied_d=applied_q=peak=rpm=measured_d=measured_q=0.0f;
-    ticks=compute_max=total_max=age_max=reverse_since=0;
-    angle_sequence=sample.sequence; vm_cache=vm.volts;
-    current_tick=heartbeat=started_ms=HAL_GetTick();
-    if (MotorControl_StartVoltage()!=HAL_OK || CurrentSense_BeginControl()!=HAL_OK) {
-      FocVoltage_TripISR("PWM/ADC start failed"); return true;
-    }
-    current_tick=heartbeat=started_ms=HAL_GetTick();
-    if (control_mode==CURRENT_CONTROL_MODE)
-      printf("FOC current start: reference ramp from 0 A, phase trip=%ld mA\r\n",
-          (long)(MOTOR_CONTROL_CURRENT_LIMIT_A*1000));
-    else printf("FOC voltage start: ramp from 0 V, current limit %.2f A\r\n",(double)MOTOR_CONTROL_CURRENT_LIMIT_A);
+    (void)Start(NULL);
   } else if (strlen(arg)>=7 && !strncmp(arg,"current",7) && isspace((unsigned char)arg[7])) {
     char *end; const char *a=arg+7; errno=0; float d=strtof(a,&end);
     if (end==a || !isspace((unsigned char)*end) || errno==ERANGE) {
@@ -480,12 +536,9 @@ bool FocVoltage_ProcessCommand(const char *command)
     if (active && (control_mode!=CURRENT_CONTROL_MODE || fault)) {
       printf("FOC current rejected: stop before mode change/restart\r\n"); return true;
     }
-    uint32_t mask=__get_PRIMASK(); __disable_irq();
-    if (!active) ResetCurrentControl();
-    control_mode=CURRENT_CONTROL_MODE;
-    current_target_d=d; current_target_q=q;
-    target_d=target_q=0.0f;
-    __set_PRIMASK(mask);
+    if (!Foc_SetCurrentTarget(d,q)) {
+      printf("FOC current rejected: state changed before update\r\n"); return true;
+    }
     printf("FOC current set: Id=%ld mA, Iq=%ld mA\r\n",(long)(d*1000),(long)(q*1000));
   } else if (strlen(arg)>=7 && !strncmp(arg,"voltage",7) && isspace((unsigned char)arg[7])) {
     char *end; const char *a=arg+7; errno=0; float d=strtof(a,&end);

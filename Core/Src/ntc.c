@@ -17,6 +17,19 @@ static ADC_HandleTypeDef *ntc_adc;
 static uint32_t sample_tick;
 static uint32_t report_tick;
 static bool streaming;
+static uint16_t latest_raw;
+static uint32_t latest_ms;
+static bool latest_valid;
+
+bool NTC_GetTemperature(float *temperature_c)
+{
+  if (!temperature_c || !latest_valid || (uint32_t)(HAL_GetTick()-latest_ms) > 100U) return false;
+  float resistance = NTC_PULLDOWN_OHMS * (4095.0f / latest_raw - 1.0f);
+  float value = 1.0f / (1.0f / 298.15f + logf(resistance / 10000.0f) / 3380.0f) - 273.15f;
+  if (!isfinite(value) || value < -40.0f || value > 125.0f) return false;
+  *temperature_c = value;
+  return true;
+}
 
 void NTC_Init(ADC_HandleTypeDef *adc)
 {
@@ -24,6 +37,7 @@ void NTC_Init(ADC_HandleTypeDef *adc)
   sample_tick = HAL_GetTick();
   report_tick = sample_tick;
   streaming = false;
+  latest_valid = false;
 }
 
 static bool CommandEquals(const char *text, const char *expected)
@@ -105,6 +119,8 @@ void NTC_Task(void)
     (void)HAL_ADCEx_RegularStop(ntc_adc);
   }
 
+  latest_valid = status == HAL_OK && raw > 0U && raw < 4095U;
+  latest_raw = raw; latest_ms = HAL_GetTick();
   if (!streaming || ((uint32_t)(now - report_tick) < NTC_REPORT_PERIOD_MS))
   {
     return;

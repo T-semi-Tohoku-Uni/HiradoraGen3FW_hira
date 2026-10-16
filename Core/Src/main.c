@@ -23,6 +23,7 @@
 /* USER CODE BEGIN Includes */
 #include "as5047p.h"
 #include "console.h"
+#include "can_comm.h"
 #include "current_sense.h"
 #include "bus_voltage.h"
 #include "motor_control.h"
@@ -54,6 +55,8 @@
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc1;
 ADC_HandleTypeDef hadc2;
+
+FDCAN_HandleTypeDef hfdcan1;
 
 I2C_HandleTypeDef hi2c3;
 
@@ -90,6 +93,7 @@ static void MX_ADC1_Init(void);
 static void MX_ADC2_Init(void);
 static void MX_OPAMP3_Init(void);
 static void MX_SPI1_Init(void);
+static void MX_FDCAN1_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -238,6 +242,7 @@ int main(void)
   MX_ADC2_Init();
   MX_OPAMP3_Init();
   MX_SPI1_Init();
+  MX_FDCAN1_Init();
   /* USER CODE BEGIN 2 */
   VoltageVector_Init();
   Console_Init(&huart1);
@@ -268,6 +273,7 @@ int main(void)
   }
   AS5047P_Init(&hspi1, &htim1);
   MotorCalibration_Init();
+  CanComm_Init(&hfdcan1); /* CAN駆動は明示armと新しいゼロ指令を必要とする。 */
   printf("Command: <offset>, u/v/w <offset>, mid, stop, start, "
          "run cw/ccw <rpm>, status, adc [decimation], adc stop, adc status, vm, ntc, ntc stop, angle, angle stop, angle status, serial status, foc voltage/start/status/stop, cal start/status/stop/save, fault, fault clear\r\n");
   /* USER CODE END 2 */
@@ -289,10 +295,14 @@ int main(void)
     MotorCalibration_Task();
     FocVoltage_Task();
     FocVoltage_ReportTask();
+    CanComm_Task();
 
     if (Console_ReadLine(motor_command, sizeof(motor_command)))
     {
-      if (CurrentSense_IsBusy() || MotorCalibration_IsActive() || FocVoltage_IsActive())
+      if (CanComm_ProcessCommand(motor_command)) {
+        /* CANの表示・試験コマンドはmainで処理する。 */
+      }
+      else if (CurrentSense_IsBusy() || MotorCalibration_IsActive() || FocVoltage_IsActive())
       {
         if (FocVoltage_ProcessCommand(motor_command) ||
             MotorCalibration_ProcessCommand(motor_command) ||
@@ -319,7 +329,8 @@ int main(void)
         (void)MotorControl_ProcessCommand(motor_command);
       }
     }
-    HAL_Delay(1);
+    /* HALは1tickを追加して待つ。0指定で次のtickまで待機する。 */
+    HAL_Delay(0);
   }
   /* USER CODE END 3 */
 }
@@ -560,6 +571,49 @@ static void MX_ADC2_Init(void)
   /* USER CODE BEGIN ADC2_Init 2 */
 
   /* USER CODE END ADC2_Init 2 */
+
+}
+
+/**
+  * @brief FDCAN1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_FDCAN1_Init(void)
+{
+
+  /* USER CODE BEGIN FDCAN1_Init 0 */
+
+  /* USER CODE END FDCAN1_Init 0 */
+
+  /* USER CODE BEGIN FDCAN1_Init 1 */
+
+  /* USER CODE END FDCAN1_Init 1 */
+  hfdcan1.Instance = FDCAN1;
+  hfdcan1.Init.ClockDivider = FDCAN_CLOCK_DIV1;
+  hfdcan1.Init.FrameFormat = FDCAN_FRAME_CLASSIC;
+  hfdcan1.Init.Mode = FDCAN_MODE_NORMAL;
+  hfdcan1.Init.AutoRetransmission = DISABLE;
+  hfdcan1.Init.TransmitPause = DISABLE;
+  hfdcan1.Init.ProtocolException = DISABLE;
+  hfdcan1.Init.NominalPrescaler = 1;
+  hfdcan1.Init.NominalSyncJumpWidth = 2;
+  hfdcan1.Init.NominalTimeSeg1 = 13;
+  hfdcan1.Init.NominalTimeSeg2 = 2;
+  hfdcan1.Init.DataPrescaler = 1;
+  hfdcan1.Init.DataSyncJumpWidth = 1;
+  hfdcan1.Init.DataTimeSeg1 = 1;
+  hfdcan1.Init.DataTimeSeg2 = 1;
+  hfdcan1.Init.StdFiltersNbr = 1;
+  hfdcan1.Init.ExtFiltersNbr = 0;
+  hfdcan1.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
+  if (HAL_FDCAN_Init(&hfdcan1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN FDCAN1_Init 2 */
+
+  /* USER CODE END FDCAN1_Init 2 */
 
 }
 

@@ -229,7 +229,7 @@ HAL_StatusTypeDef MotorControl_ResetTimerPhase(TIM_HandleTypeDef *timer)
   return result;
 }
 
-static HAL_StatusTypeDef MotorControl_PreparePwmStart(void)
+static HAL_StatusTypeDef MotorControl_PreparePwmStart(bool (*permitted)(void))
 {
   TIM_TypeDef *tim = motor_timer->Instance;
   STSPIN32G4_FaultReport report;
@@ -270,9 +270,17 @@ static HAL_StatusTypeDef MotorControl_PreparePwmStart(void)
              TIM_OCMODE_FORCED_INACTIVE | (TIM_OCMODE_FORCED_INACTIVE << 8U));
   MODIFY_REG(tim->CCMR2, TIM_CCMR2_OC3M, TIM_OCMODE_FORCED_INACTIVE);
   if (MotorControl_ResetTimerPhase(motor_timer) != HAL_OK) return HAL_ERROR;
+  /* ブートストラップも通電。I2C待ち中の許可失効後には開始しない。 */
+  uint32_t mask = __get_PRIMASK(); __disable_irq();
+  if (permitted && !permitted()) {
+    tim->CCMR1 = saved_ccmr1; tim->CCMR2 = saved_ccmr2;
+    __set_PRIMASK(mask);
+    return HAL_ERROR;
+  }
   SET_BIT(tim->CCER, MOTOR_CONTROL_OUTPUT_ENABLE_MASK);
   SET_BIT(tim->CR1, TIM_CR1_CEN);
   SET_BIT(tim->BDTR, TIM_BDTR_MOE);
+  __set_PRIMASK(mask);
   MotorControl_DelayMicroseconds(MOTOR_CONTROL_BOOTSTRAP_CHARGE_US);
 
   /* All six outputs OFF before restoring PWM modes or clearing faults. */
@@ -307,11 +315,11 @@ i2c_error:
   return result;
 }
 
-static HAL_StatusTypeDef MotorControl_StartAtMidpoint(void)
+static HAL_StatusTypeDef MotorControl_StartAtMidpoint(bool (*permitted)(void))
 {
   TIM_TypeDef *tim = motor_timer->Instance;
   uint32_t interrupt_state;
-  HAL_StatusTypeDef result = MotorControl_PreparePwmStart();
+  HAL_StatusTypeDef result = MotorControl_PreparePwmStart(permitted);
 
   if (result != HAL_OK)
   {
@@ -333,6 +341,11 @@ static HAL_StatusTypeDef MotorControl_StartAtMidpoint(void)
     return result;
   }
 
+  /* 起動準備中の停止要求を、出力許可と同じ排他区間で最終確認する。 */
+  if (permitted && !permitted()) {
+    __set_PRIMASK(interrupt_state);
+    return HAL_ERROR;
+  }
   /* Enable all six pins together, then start the counter and main output. */
   SET_BIT(tim->CCER, MOTOR_CONTROL_OUTPUT_ENABLE_MASK);
   SET_BIT(tim->CR1, TIM_CR1_CEN);
@@ -556,7 +569,7 @@ static void MotorControl_StartSixStep(MotorControlDirection direction,
   const uint32_t target_duty_x10 = MotorControl_RunDutyX10(requested_rpm);
   uint32_t interrupt_state;
 
-  if (MotorControl_PreparePwmStart() != HAL_OK)
+  if (MotorControl_PreparePwmStart(NULL) != HAL_OK)
   {
     return;
   }
@@ -796,7 +809,7 @@ bool MotorControl_ProcessCommand(const char *command)
 
   if (MotorControl_IsCommand(command, "start"))
   {
-    if (MotorControl_StartAtMidpoint() == HAL_OK)
+    if (MotorControl_StartAtMidpoint(NULL) == HAL_OK)
     {
       printf("PWM started: U=V=W=50.00 %%\r\n");
     }
@@ -980,6 +993,10 @@ float MotorControl_GetPeriodSeconds(void)
 }
 HAL_StatusTypeDef MotorControl_StartVoltage(void)
 {
+  return MotorControl_StartVoltageGuarded(NULL);
+}
+HAL_StatusTypeDef MotorControl_StartVoltageGuarded(bool (*permitted)(void))
+{
   if (!MotorControl_IsStopped()) return HAL_BUSY;
   /* CubeMX再生成前のRCR=0で45usの締切を使うと頂点で混在更新になるため拒否。 */
   if (motor_timer == NULL || motor_timer->Init.RepetitionCounter != 1U ||
@@ -988,9 +1005,12 @@ HAL_StatusTypeDef MotorControl_StartVoltage(void)
     printf("Voltage mode blocked: set CubeMX TIM1 Repetition Counter=1, Center Aligned 1\r\n");
     return HAL_ERROR;
   }
-  HAL_StatusTypeDef result = MotorControl_StartAtMidpoint();
+  HAL_StatusTypeDef result = MotorControl_StartAtMidpoint(permitted);
   if (result != HAL_OK) return result;
   uint32_t mask = __get_PRIMASK(); __disable_irq();
+  if (permitted && !permitted()) {
+    MotorControl_Stop(); __set_PRIMASK(mask); return HAL_ERROR;
+  }
   for (unsigned i=0; i<3; i++) voltage_compare[i] = MotorControl_MidpointCompare();
   motor_mode = MOTOR_CONTROL_MODE_VOLTAGE;
   __set_PRIMASK(mask);
