@@ -79,6 +79,7 @@ static float selected_offset_percent;
 static volatile bool outputs_enabled;
 static volatile uint32_t voltage_compare[3];
 static volatile uint32_t foc_adc_began, foc_adc_phase, foc_update_cnt, foc_adc_cnt;
+static volatile uint32_t foc_adc_phase_cycles;
 static volatile bool foc_update_down, foc_adc_down;
 static volatile MotorControlMode motor_mode = MOTOR_CONTROL_MODE_STOPPED;
 static volatile uint8_t current_sector;
@@ -1084,14 +1085,42 @@ void MotorControl_FocAdcISR(void)
 void MotorControl_FocAdcBeginISR(void)
 {
   if (!FocVoltage_IsActive()) return;
+  uint32_t mask=__get_PRIMASK(); __disable_irq();
   foc_adc_began=DWT->CYCCNT;
 #ifdef ENCODER_TIMING_PROBE
   AS5047P_TimingAdcBegin();
 #endif
   uint32_t arr=__HAL_TIM_GET_AUTORELOAD(motor_timer);
-  foc_adc_cnt=__HAL_TIM_GET_COUNTER(motor_timer);
-  foc_adc_down=(motor_timer->Instance->CR1 & TIM_CR1_DIR)!=0U;
+  bool down_before;
+  do {
+    down_before=(motor_timer->Instance->CR1 & TIM_CR1_DIR)!=0U;
+    uint32_t before=DWT->CYCCNT;
+    foc_adc_cnt=__HAL_TIM_GET_COUNTER(motor_timer);
+    uint32_t after=DWT->CYCCNT;
+    foc_adc_phase_cycles=before+(uint32_t)(after-before)/2U;
+    foc_adc_down=(motor_timer->Instance->CR1 & TIM_CR1_DIR)!=0U;
+  } while (down_before!=foc_adc_down);
   foc_adc_phase=foc_adc_down ? arr-foc_adc_cnt : arr+foc_adc_cnt;
+  __set_PRIMASK(mask);
+}
+bool MotorControl_GetFocTimesISR(uint32_t *adc_cycles, uint32_t *pwm_cycles)
+{
+  if (!motor_timer || !control_tick_hz) return false;
+  uint32_t arr=__HAL_TIM_GET_AUTORELOAD(motor_timer);
+  uint32_t phase=foc_adc_phase;
+  uint32_t period=SystemCoreClock/control_tick_hz;
+  if (!arr || phase>=2U*arr || !period ||
+      (uint32_t)(DWT->CYCCNT-foc_adc_began)>=period) return false;
+  /* The phase snapshot belongs to the ADC trigger's top. Reject a callback
+   * too late to write this cycle rather than silently selecting a later top. */
+  if (phase>2U*arr-arr/5U) return false;
+  float cycles_per_count=(float)period/(float)(2U*arr);
+  uint32_t top=foc_adc_phase_cycles-(uint32_t)((float)phase*cycles_per_count+0.5f);
+  uint32_t trigger_counts=arr-__HAL_TIM_GET_COMPARE(motor_timer,TIM_CHANNEL_4);
+  *adc_cycles=top+(uint32_t)((float)trigger_counts*cycles_per_count+0.5f)+
+      (uint32_t)((float)SystemCoreClock*(MOTOR_CONTROL_FOC_ADC_SAMPLE_OFFSET_NS*1e-9f)+0.5f);
+  *pwm_cycles=top+period+period/2U;
+  return true;
 }
 void MotorControl_PrintFocPhase(void)
 {

@@ -18,6 +18,7 @@ static uint32_t rx_clear, tx_clear, rx_tc, rx_te, tx_te;
  * HALの転送API/IRQ/Abortと混用しない（HALのStateは転送状態を表さない）。 */
 static bool fast_owned;
 static uint32_t cs_guard_cycles, cs_high_cycles;
+static uint32_t angle_reference_cycles;
 static void FrameComplete(void);
 static void StopDma(void)
 {
@@ -149,9 +150,11 @@ static void DelayCsSince(uint32_t start)
 static void DelayCs(void) { DelayCsSince(DWT->CYCCNT); }
 static void RaiseCs(void)
 {
+  uint32_t mask=__get_PRIMASK(); __disable_irq();
   SPI1_SS_GPIO_Port->BSRR = SPI1_SS_Pin;
   __DSB(); /* GPIO書込み完了後を基準にしてHigh時間を短く見積もらない。 */
   cs_high_cycles=DWT->CYCCNT;
+  __set_PRIMASK(mask);
 }
 static bool Expired(void)
 {
@@ -272,6 +275,7 @@ static void FrameComplete(void)
   /* Highガードは次回StartFrame側で残り時間を確認する。
    * RESPONSEでは角度の解析・公開を先に進めてもCSをLowにしないため安全。 */
   if (state == REQUEST) {
+    angle_reference_cycles = cs_high_cycles;
     state = RESPONSE;
     StartFrame(0U); /* NOPが前フレームの要求に対応するデータを返す。 */
     return;
@@ -305,6 +309,7 @@ static void FrameComplete(void)
     sample->mechanical_rad = (float)raw * (TWO_PI / 16384.0f);
     sample->electrical_rad = (float)(((uint32_t)raw * MOTOR_CONTROL_POLE_PAIRS) & 0x3FFFU) * (TWO_PI / 16384.0f);
     sample->request_cycles = start_cycles; sample->received_cycles = received;
+    sample->reference_cycles = angle_reference_cycles;
     sample->updated_ms = HAL_GetTick(); sample->sequence = latest.sequence + 1U;
     sample->valid = diagnostic_ok && state == DECODING;
     /* 公開と要求受付再開を一緒に確定する。

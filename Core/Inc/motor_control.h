@@ -70,11 +70,14 @@ bool MotorControl_IsStopped(void);
 bool MotorControl_IsVoltageMode(void);
 /* Fixed ADC/PWM control period derived from the initialized TIM1 clock. */
 float MotorControl_GetPeriodSeconds(void);
+/* ADC ISR only: representative S/H time and next PWM interval midpoint (DWT).
+ * False if the snapshot is no longer in the original control period. */
+bool MotorControl_GetFocTimesISR(uint32_t *adc_cycles, uint32_t *pwm_cycles);
 HAL_StatusTypeDef MotorControl_StartVoltage(void);
 /* main専用。許可関数は短時間・非ブロッキングで、割り込み禁止中にも呼ばれる。 */
 HAL_StatusTypeDef MotorControl_StartVoltageGuarded(bool (*permitted)(void));
 bool MotorControl_SetVoltage(float angle, float vd, float vq, float vm);
-/* FOC: reuse the current ADC observation's sine/cosine pair. */
+/* FOC: sine/cosine predicted for the midpoint of the next PWM interval. */
 bool MotorControl_SetVoltageSinCos(float s, float c, float vd, float vq, float vm);
 
 

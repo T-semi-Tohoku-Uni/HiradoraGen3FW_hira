@@ -23,7 +23,7 @@ def test(path):
     f.uc.mem_write(f.foc['running'], b'\1')
     f.uc.mem_write(f.foc['calibration']+16, struct.pack('<ifff',1,.73,0,0))
     f.uc.mem_write(f.STATE, struct.pack('<4f',1,-.5,1,-.5))
-    sensor = struct.pack('<H2xffIIIIB3x',100,.5,3.5,0,0,0,42,1)
+    sensor = struct.pack('<H2xffIIIIB3xI',100,.5,3.5,0,0,0,42,1,0)
     valid = True
     events = []
     def hook(uc, addr, size, name):
@@ -37,7 +37,7 @@ def test(path):
             result = int(valid)
         elif name == 'AS5047P_Tick':
             # Simulate newly published sensor data: existing FOC copy must not change.
-            sensor = struct.pack('<H2xffIIIIB3x',200,1.,.7168,0,0,0,43,1)
+            sensor = struct.pack('<H2xffIIIIB3xI',200,1.,.7168,0,0,0,43,1,0)
         uc.reg_write(UC_ARM_REG_R0, result)
         uc.reg_write(UC_ARM_REG_PC, uc.reg_read(UC_ARM_REG_LR))
     for name in ('AS5047P_GetSample','AS5047P_Tick','HAL_GetTick',
@@ -46,7 +46,7 @@ def test(path):
         f.uc.hook_add(UC_HOOK_CODE,hook,user_data=name,begin=addr,end=addr)
     original = sensor
     f.call('FocVoltage_CurrentISR', f.STATE, 0)
-    assert bytes(f.uc.mem_read(f.foc['cycle_angle'],32)) == original
+    assert bytes(f.uc.mem_read(f.foc['cycle_angle'],36)) == original
     f.call('MotorControl_FocAdcISR')
     assert events.count('AS5047P_Tick') == 1, events
     assert events.index('AS5047P_GetSample') < events.index('AS5047P_Tick') < events.index('park') < events.index('FocVoltage_TickISR')
@@ -64,7 +64,7 @@ def test(path):
         f.uc.mem_write(f.foc['running'],b'\1')
         valid = failure != 'invalid'
         if failure == 'stale':
-            sensor=struct.pack('<H2xffIIIIB3x',100,.5,3.5,0xfe000000,0,0,44,1)
+            sensor=struct.pack('<H2xffIIIIB3xI',100,.5,3.5,0xfe000000,0,0,44,1,0xfe000000)
         f.call('FocVoltage_CurrentISR',f.STATE,0)
         assert 'AS5047P_Tick' not in events and not f.get('running','<?')
     print(f'PASS: snapshot/request/Park order, no duplicate tail request, arming fallback, invalid/stale guards: {path}')

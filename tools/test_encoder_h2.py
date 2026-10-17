@@ -9,22 +9,26 @@ import sys
 
 from test_current_pi import Firmware
 from unicorn import UC_HOOK_CODE
-from unicorn.arm_const import UC_ARM_REG_R0, UC_ARM_REG_PC, UC_ARM_REG_LR
+from unicorn.arm_const import UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_PC, UC_ARM_REG_LR
 
 
 def test(path, factory=Firmware):
     f = factory(path)
-    sensor = bytes(32)
+    sensor = bytes(36)
 
     def stub(uc, address, size, data):
         if address == (f.symbols['AS5047P_GetSample'] & ~1):
             uc.mem_write(uc.reg_read(UC_ARM_REG_R0), sensor)
             uc.reg_write(UC_ARM_REG_R0, 1)
+        elif address == (f.symbols['MotorControl_GetFocTimesISR'] & ~1):
+            uc.mem_write(uc.reg_read(UC_ARM_REG_R0), bytes(4))
+            uc.mem_write(uc.reg_read(UC_ARM_REG_R1), struct.pack('<I',12000))
+            uc.reg_write(UC_ARM_REG_R0, 1)
         else:
             uc.reg_write(UC_ARM_REG_R0, 0)
         uc.reg_write(UC_ARM_REG_PC, uc.reg_read(UC_ARM_REG_LR))
 
-    for name in ('AS5047P_GetSample', 'HAL_GetTick'):
+    for name in ('AS5047P_GetSample', 'HAL_GetTick', 'MotorControl_GetFocTimesISR'):
         address = f.symbols[name] & ~1
         f.uc.hook_add(UC_HOOK_CODE, stub, begin=address, end=address)
     f.uc.mem_write(f.foc['active'], b'\x01')
@@ -45,10 +49,13 @@ def test(path, factory=Firmware):
                 theta = index * 2 * math.pi / 360
                 theta = struct.unpack('<f', struct.pack('<f', theta))[0]
                 raw_elec = (7 * theta) % (2 * math.pi)
-                sensor = struct.pack('<H2xffIIIIB3x', index, theta, raw_elec, 0, 0, 0, 42, 1)
+                sensor = struct.pack('<H2xffIIIIB3xI', index, theta, raw_elec, 0, 0, 0, 42, 1, 0)
+                # Independent stationary cases; moving predictor covered by
+                # test_angle_prediction.py, including corrected H2 velocity.
+                f.uc.mem_write(f.foc['predictor_valid'], b'\0')
                 f.call('FocVoltage_CurrentISR', f.STATE, 0)
                 assert f.get('observation_valid', '<?')
-                assert bytes(f.uc.mem_read(f.foc['cycle_angle'], 32)) == sensor
+                assert bytes(f.uc.mem_read(f.foc['cycle_angle'], 36)) == sensor
                 base = (direction * 7 * theta - offset) % (2 * math.pi)
                 # Specified electrical error is independent of calibration direction.
                 delta = -gain * (a2*math.cos(2*theta) + b2*math.sin(2*theta)) if enabled else 0

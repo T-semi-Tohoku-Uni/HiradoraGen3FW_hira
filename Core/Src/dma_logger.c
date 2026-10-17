@@ -34,7 +34,7 @@ static uint32_t last_sequence;
 static uint64_t elapsed_samples;
 static uint32_t flush_tick;
 /* One immutable DMA staging buffer; raw blocks remain small. */
-static char tx_text[640];
+static char tx_text[896];
 static uint16_t tx_length;
 
 /* Teleplot専用の整数整形。多数のsnprintfによるmain負荷を避ける。
@@ -202,6 +202,14 @@ void DmaLogger_Task(void)
       uint32_t received_age=sample->foc.adc_callback_cycles-sample->foc.angle_received_cycles;
       PutInteger(&out,"angle_age_us",timestamp,request_age/(SystemCoreClock/1000000U));
       PutInteger(&out,"angle_rx_age_us",timestamp,received_age/(SystemCoreClock/1000000U));
+      PutFixed(&out,"pwm_elec_rad",timestamp,sample->foc.pwm_electrical_rad);
+      PutFixed(&out,"omega_e_rad_s",timestamp,sample->foc.electrical_velocity_rad_s);
+      PutFixed(&out,"angle_adc_dt_us",timestamp,
+          (float)(int32_t)(sample->foc.adc_sample_cycles-sample->foc.angle_reference_cycles)*
+          (1e6f/(float)SystemCoreClock));
+      PutFixed(&out,"angle_pwm_dt_us",timestamp,
+          (float)(int32_t)(sample->foc.pwm_midpoint_cycles-sample->foc.angle_reference_cycles)*
+          (1e6f/(float)SystemCoreClock));
     }
     if (!out.ok || !stamp.ok) { Transmitted(false); return; }
     tx_length=(uint16_t)(out.position-tx_text);

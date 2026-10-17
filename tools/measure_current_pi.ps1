@@ -7,6 +7,8 @@ $p=[IO.Ports.SerialPort]::new($Port,921600,[IO.Ports.Parity]::None,8,[IO.Ports.S
 $p.WriteTimeout=1000
 $p.ReadBufferSize=262144
 $writer=[IO.StreamWriter]::new((Join-Path (Get-Location) $Log),$false)
+$events=[IO.StreamWriter]::new((Join-Path (Get-Location) ($Log+'.commands.log')),$false)
+$runTimer=$null
 function Receive([int]$ms){
   $b=[Text.StringBuilder]::new(); $timer=[Diagnostics.Stopwatch]::StartNew()
   while($timer.ElapsedMilliseconds -lt $ms){
@@ -15,7 +17,7 @@ function Receive([int]$ms){
   }
   $writer.Flush(); return $b.ToString()
 }
-function Cmd([string]$s,[int]$ms=150){$writer.WriteLine("# COMMAND $s");$p.Write($s+"`n");Receive $ms}
+function Cmd([string]$s,[int]$ms=150){$events.WriteLine("$([DateTimeOffset]::Now.ToString('o')) $s");$events.Flush();$p.Write($s+"`n");Receive $ms}
 function Show([string]$s){($s -split "`n" | Where-Object {$_ -match '^(FOC|PWM|Serial|VM|Calibration)'}) -join "`n"}
 try {
   $p.Open(); $null=Cmd 'stop'; $null=Cmd 'adc stop'; $null=Receive 500
@@ -59,10 +61,10 @@ try {
   }
 } finally {
   if($p.IsOpen){try {
-    if($runTimer){$writer.WriteLine("# STOP_REQUEST elapsed_ms="+$runTimer.ElapsedMilliseconds)}
+    if($runTimer){$events.WriteLine("# STOP_REQUEST elapsed_ms="+$runTimer.ElapsedMilliseconds)}
     $null=Cmd 'stop';$null=Cmd 'adc stop'
     if($Temperature){Write-Output (Cmd 'ntc' 250);$null=Cmd 'ntc stop'}
     Write-Output (Show (Cmd 'foc status'));Write-Output (Cmd 'status');Write-Output (Cmd 'serial status');Write-Output (Cmd 'vm')
   } finally {$p.Close()}}
-  $p.Dispose();$writer.Dispose()
+  $p.Dispose();$writer.Dispose();$events.Dispose()
 }

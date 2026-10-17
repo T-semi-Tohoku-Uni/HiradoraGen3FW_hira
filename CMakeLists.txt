@@ -27,6 +27,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 # Core project settings
 project(${CMAKE_PROJECT_NAME})
 option(FOC_USE_CORDIC "Use STM32 CORDIC for voltage-vector sin/cos" ON)
+option(FOC_ANGLE_PREDICTION "Advance observer angle to ADC/PWM target times" ON)
 message("Build type: " ${CMAKE_BUILD_TYPE})
 
 # Enable CMake support for ASM and C languages
@@ -38,6 +39,7 @@ string(REPLACE "STM32G431xx_FLASH.ld" "STM32G431xx_CAL_FLASH.ld" CMAKE_EXE_LINKE
 
 # Create an executable object type
 add_executable(${CMAKE_PROJECT_NAME})
+target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE FOC_ANGLE_PREDICTION=$<BOOL:${FOC_ANGLE_PREDICTION}>)
 
 set_property(TARGET ${CMAKE_PROJECT_NAME} APPEND PROPERTY LINK_DEPENDS "${CMAKE_SOURCE_DIR}/STM32G431xx_CAL_FLASH.ld")
 
@@ -58,6 +60,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Drivers/CMSIS/DSP/Source/ControllerFunctions/arm_sin_cos_f32.c
     Drivers/CMSIS/DSP/Source/CommonTables/arm_common_tables.c
     Core/Src/foc_voltage.c
+    Core/Src/angle_predictor.c
     Core/Src/current_pi.c
     Core/Src/voltage_vector.c
     Core/Src/trig_benchmark.c
@@ -118,7 +121,7 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
 # 20 kHz周期処理はサイズ優先(-Os)より実行時間を優先する。
 # Debugでも同じ演算経路を使うため、これらの周期処理ファイルは-O2でビルドする。
 set_source_files_properties(
-    Core/Src/foc_voltage.c Core/Src/voltage_vector.c Core/Src/trig_benchmark.c Core/Src/current_pi.c
+    Core/Src/foc_voltage.c Core/Src/angle_predictor.c Core/Src/voltage_vector.c Core/Src/trig_benchmark.c Core/Src/current_pi.c
     Core/Src/as5047p.c Core/Src/current_sense.c Core/Src/motor_control.c
     Drivers/CMSIS/DSP/Source/ControllerFunctions/arm_sin_cos_f32.c
     PROPERTIES COMPILE_OPTIONS "-O2")
@@ -136,3 +139,12 @@ set_source_files_properties(
     ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_tim.c
     TARGET_DIRECTORY STM32_Drivers
     PROPERTIES COMPILE_OPTIONS "-O2")
+
+# Keep Debug within the 126 KiB application region after angle prediction.
+# Preserve the reserved calibration page; only these HAL units use -Os in Debug.
+set_source_files_properties(
+    ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_spi.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_dma.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_gpio.c
+    TARGET_DIRECTORY STM32_Drivers
+    PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Debug>:-Os>")

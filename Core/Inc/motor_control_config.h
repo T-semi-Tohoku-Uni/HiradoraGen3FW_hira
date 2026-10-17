@@ -45,6 +45,12 @@
 #define MOTOR_CONTROL_FOC_MAIN_TIMEOUT_MS          20U
 #define MOTOR_CONTROL_FOC_STANDSTILL_MS            300U
 #define MOTOR_CONTROL_FOC_STANDSTILL_RAD           0.02f
+/* Mean of the two S/H endpoints: 12.5 and 37.5 ADC clocks, ADC=PCLK/4.
+ * Current 40 MHz ADC configuration: 25 clocks = 625 ns after CC4 trigger.
+ * Re-evaluate if ADC clock, resolution or injected ranks/sample time change. */
+#define MOTOR_CONTROL_FOC_ADC_SAMPLE_OFFSET_NS     625U
+/* Tracking filter time scale; variable sample dt sets alpha/beta each update. */
+#define MOTOR_CONTROL_FOC_TRACKING_TAU_S           0.0005f
 /* 2026-09-25: ±Vq/±Vd試験でADC電流は印加電圧と逆符号だったため、
  * dq観測だけを反転する。raw相電流ログ・絶対値の過電流保護は変更しない。
  * 電流の絶対精度、サンプル時刻の影響は別途検証が必要。 */

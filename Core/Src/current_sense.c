@@ -492,12 +492,13 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
     MotorCalibration_CurrentISR(currents, rails);
     FocVoltage_CurrentISR(currents, rails, index, callback_cycles);
   }
-  /* 同じADC値のdq観測完成後、角度更新前に組で保存する。 */
+  /* Finish the deadline-critical PWM calculation/write before copying logs.
+   * The FOC observation remains fixed until the next ADC callback. */
+  MotorControl_FocAdcISR();
+  /* Save the same ADC/dq snapshot after the PWM write. */
   if (acquisition_sample_count == 0U && log_requested) {
     DmaLogger_Push(index, u1_raw, v_raw, u2_raw, w_raw, MotorControl_GetSector());
   }
-  /* 電流取得/保護・角度コピー後に次回DMAを開始済み。ここでFOC→CCRを実行する。 */
-  MotorControl_FocAdcISR();
   last_sample_tick = HAL_GetTick();
   __HAL_ADC_CLEAR_FLAG(adc_slave, ADC_FLAG_JEOC | ADC_FLAG_JEOS);
 

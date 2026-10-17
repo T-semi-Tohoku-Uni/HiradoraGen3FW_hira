@@ -1,10 +1,15 @@
-param([ValidateRange(0,4096)][int]$Raw=0,[string]$Log='build/can_drive_hardware.log',[switch]$Steps,[switch]$LoadSteps,[switch]$DropUnderLoad,[switch]$Reverse)
+param([ValidateRange(0,4096)][int]$Raw=0,[string]$Log='build/can_drive_hardware.log',[switch]$Steps,[switch]$LoadSteps,[switch]$DropUnderLoad,[switch]$Reverse,
+  [ValidateRange(4096,12288)][int]$StepPeakRaw=4096,
+  [ValidateRange(5,40)][int]$HoldPolls=5,
+  [ValidateRange(450,900)][int]$SpeedLimit=450)
 # This script STARTS PWM. Notify the operator before running it.
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 if($Steps -and $LoadSteps){throw 'Select Steps or LoadSteps'}
 if(($DropUnderLoad -or $Reverse) -and !$LoadSteps){throw 'DropUnderLoad/Reverse requires LoadSteps'}
+if($StepPeakRaw -ne 4096 -and !$LoadSteps){throw 'StepPeakRaw requires LoadSteps'}
 $peakLimit=if($LoadSteps -or $Raw -gt 1638){7000}else{3000}
+if($LoadSteps){$peakLimit=[math]::Min(19000,[int]($StepPeakRaw*20000.0/16384)+2000)}
 Add-Type -TypeDefinition @'
 using System;
 using System.IO.Ports;
@@ -25,7 +30,7 @@ public sealed class CanTestSender {
     worker=new Thread(()=>{
       var clock=Stopwatch.StartNew();
       try {
-        while(!stop && clock.ElapsedMilliseconds<10000) {
+        while(!stop && clock.ElapsedMilliseconds<120000) {
           port.Write(frame+"\r");
           Events.Enqueue("TX_MS "+clock.ElapsedMilliseconds);
           Thread.Sleep(5);
@@ -64,7 +69,7 @@ function Running([string]$frame,[int]$ExpectedMa=[int]::MinValue) {
   $s=Cmd 'foc status' $frame;Note $s
   Check $s 'FOC: running';Check $s 'fault=none'
   if($s -notmatch 'rpm=(-?\d+)'){throw 'Missing speed'}
-  if([math]::Abs([int]$Matches[1]) -gt 450){throw 'Host speed limit'}
+  if([math]::Abs([int]$Matches[1]) -gt $SpeedLimit){throw 'Host speed limit'}
   if($s -notmatch 'peak=(\d+) mA'){throw 'Missing current'}
   if([int]$Matches[1] -gt $peakLimit){throw 'Host current limit'}
   if($ExpectedMa -ne [int]::MinValue) {
@@ -92,13 +97,22 @@ try {
     # Verify settled targets and measured Iq across positive steps and zero return.
     $stepValues=if($LoadSteps){@(1638,2458,3277,4096,0)}else{@(410,819,1638,0)}
     if($DropUnderLoad){$stepValues=@(1638,2458,3277,4096)}
+    # 長時間試験でも既存の2/3/4/5Aを通過してから指定ピークへ進む。
+    if($StepPeakRaw -gt 4096){
+      $stepValues=@(1638,2458,3277,4096,$StepPeakRaw)
+      if(!$DropUnderLoad){$stepValues+=0}
+    }
+    $previousMa=0
     foreach($stepRaw in $stepValues) {
       if($Reverse){$stepRaw=-$stepRaw}
       $command='t2008'+($stepRaw -band 65535).ToString('X4')+'000000000000'
       $expected=[int][math]::Truncate($stepRaw*20000.0/16384)
       Note "STEP raw=$stepRaw expected_mA=$expected"
-      $null=Pump 120 $command
-      for($i=0;$i -lt 5;$i++){Running $command $expected}
+      # FWの60A/s制限によるランプ時間と送信遅延を待ってから整定を判定する。
+      $settleMs=[int][math]::Max(120,[math]::Ceiling([math]::Abs($expected-$previousMa)/60.0)+100)
+      $null=Pump $settleMs $command
+      for($i=0;$i -lt $HoldPolls;$i++){Running $command $expected}
+      $previousMa=$expected
     }
   } else {for($i=0;$i -lt 5;$i++){Running $command}}
   $s=Cmd 'foc current 0 1' $command;Note $s;Check $s 'UART control blocked'

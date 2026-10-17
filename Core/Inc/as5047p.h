@@ -11,6 +11,9 @@ typedef struct {
    * received: 応答のISR取得時刻。どちらもセンサー内部の測定時刻ではない。 */
   uint32_t request_cycles, received_cycles, updated_ms, sequence;
   bool valid;
+  /* DAEC angle read latch: request-frame CS rising edge, not DMA completion.
+   * No uncompensated sensor propagation delay is added to this timestamp. */
+  uint32_t reference_cycles;
 } AS5047P_Sample;
 void AS5047P_Init(SPI_HandleTypeDef *spi, TIM_HandleTypeDef *timer);
 void AS5047P_Task(void);

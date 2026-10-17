@@ -7,6 +7,7 @@
 #include "current_sense.h"
 #include "voltage_vector.h"
 #include "current_pi.h"
+#include "angle_predictor.h"
 #include <math.h>
 #include <ctype.h>
 #include <stdlib.h>
@@ -46,6 +47,16 @@ static volatile uint32_t adc_complete_cycles;
 static volatile bool adc_completed;
 static float observed_electrical;
 static float observed_sin, observed_cos;
+static float pwm_electrical, pwm_sin, pwm_cos;
+static float prediction_adc_seconds, prediction_pwm_seconds;
+static uint32_t observation_sample_cycles, observation_pwm_cycles;
+static AnglePredictor angle_predictor;
+/* A/B builds keep identical observer/math paths; only the extrapolation is
+ * suppressed. Both initializers are nonzero to preserve data/code layout. */
+static volatile uint32_t prediction_mode=FOC_ANGLE_PREDICTION ? 1U : 2U;
+static bool predictor_valid, predictor_h2;
+static int predictor_h2_gain;
+static uint32_t predictor_sequence, predictor_cycles;
 static float observed_base_electrical, observed_correction;
 static volatile bool h2_enabled; /* Boot OFF; no Flash persistence. */
 static volatile int h2_gain = 1;
@@ -80,6 +91,11 @@ bool FocVoltage_GetObservationISR(FocVoltage_Observation *observation)
   observation->adc_callback_cycles=observation_adc_cycles;
   observation->angle_request_cycles=cycle_angle.request_cycles;
   observation->angle_received_cycles=cycle_angle.received_cycles;
+  observation->angle_reference_cycles=cycle_angle.reference_cycles;
+  observation->adc_sample_cycles=observation_sample_cycles;
+  observation->pwm_midpoint_cycles=observation_pwm_cycles;
+  observation->pwm_electrical_rad=pwm_electrical;
+  observation->electrical_velocity_rad_s=angle_predictor.velocity;
   return true;
 }
 static uint32_t last_tick_cycles, angle_sequence, angle_cycles, reverse_since;
@@ -126,6 +142,7 @@ static bool ConfigValid(void)
     MOTOR_CONTROL_FOC_ANGLE_MAX_AGE_US>0U && MOTOR_CONTROL_FOC_MAIN_TIMEOUT_MS>0U &&
     MOTOR_CONTROL_FOC_STANDSTILL_MS>0U && isfinite(MOTOR_CONTROL_FOC_STANDSTILL_RAD) &&
     MOTOR_CONTROL_FOC_STANDSTILL_RAD>0.0f &&
+    isfinite(MOTOR_CONTROL_FOC_TRACKING_TAU_S) && MOTOR_CONTROL_FOC_TRACKING_TAU_S>0.0f &&
     fabsf(MOTOR_CONTROL_FOC_CURRENT_POLARITY)==1.0f;
 }
 static float Approach(float value,float goal,float step)
@@ -232,20 +249,20 @@ void FocVoltage_TickISR(void)
   /* CurrentISRで取得・検証済み。ここで再取得するとdq電流と出力角がずれる。 */
   if (!observation_valid) { FocVoltage_TripISR("current observation invalid"); return; }
   const AS5047P_Sample *sample=&cycle_angle;
-  uint32_t age=began-sample->request_cycles;
+  uint32_t age=began-sample->reference_cycles;
   if (age>age_max) age_max=age;
   if (age>(SystemCoreClock/1000000U)*MOTOR_CONTROL_FOC_ANGLE_MAX_AGE_US) {
     FocVoltage_TripISR("encoder age limit"); return;
   }
   if (sample->sequence!=angle_sequence) {
-    uint32_t elapsed=sample->request_cycles-angle_cycles;
+    uint32_t elapsed=sample->reference_cycles-angle_cycles;
     if (elapsed) {
       float speed=Difference(sample->mechanical_rad,previous_angle)*
           (60.0f/TWO_PI)*(float)SystemCoreClock/(float)elapsed;
       /* 14bitの量子化を20kHzで差分すると速度に段差が出るため平滑化する。 */
       rpm+=(speed-rpm)*(1.0f/64.0f);
     }
-    angle_cycles=sample->request_cycles; angle_sequence=sample->sequence;
+    angle_cycles=sample->reference_cycles; angle_sequence=sample->sequence;
     previous_angle=sample->mechanical_rad;
   }
   if (fabsf(rpm)>MOTOR_CONTROL_FOC_MAX_RPM) { FocVoltage_TripISR("speed limit"); return; }
@@ -263,11 +280,11 @@ void FocVoltage_TickISR(void)
     applied_d=Approach(applied_d,target_d,step);
     applied_q=Approach(applied_q,target_q,step);
   }
-  electrical=observed_electrical;
+  electrical=pwm_electrical;
   /* UVW座標で負の相順ならqも反転し、encoder増加方向のトルクを正にする。
-   * 初版は角度外挿なし。前周期の取得角を使用し、古さを監視する。
-   * CCRはこのISR後、次の頂点で反映（RCR=1）。センサー内部遅延は別途存在する。 */
-  if (!MotorControl_SetVoltageSinCos(observed_sin,observed_cos,applied_d,
+   * Predict to next top + half a PWM period; Park uses the ADC sample time.
+   * DAEC is already applied by the sensor: no core propagation delay added. */
+  if (!MotorControl_SetVoltageSinCos(pwm_sin,pwm_cos,applied_d,
       applied_q*(float)calibration.direction,vm_cache)) {
     FocVoltage_TripISR("voltage output rejected"); return;
   }
@@ -297,7 +314,7 @@ void FocVoltage_CurrentISR(const float currents[4],bool rails,
   adc_seen=true;
   if (!running) return; /* 起動準備中は電流保護だけ行い、観測値を公開しない。 */
   if (!AS5047P_GetSample(&cycle_angle)) { FocVoltage_TripISR("encoder invalid"); return; }
-  uint32_t age=DWT->CYCCNT-cycle_angle.request_cycles;
+  uint32_t age=DWT->CYCCNT-cycle_angle.reference_cycles;
   if (age>(SystemCoreClock/1000000U)*MOTOR_CONTROL_FOC_ANGLE_MAX_AGE_US) {
     FocVoltage_TripISR("encoder age limit"); return;
   }
@@ -313,8 +330,7 @@ void FocVoltage_CurrentISR(const float currents[4],bool rails,
   float w=currents[3]*MOTOR_CONTROL_FOC_CURRENT_POLARITY;
   float a=(2.0f*u-v-w)/3.0f, b=(v-w)/1.732050808f;
   float c,s;
-  /* 今回のADCに組み合わせる最新角度。前周期のelectricalは再利用しない。
-   * この角度をTickISRにも渡す。センサー遅延を仮定した外挿はまだ行わない。 */
+  /* Calibrate at the sensor latch time, then predict separately to ADC/PWM. */
   observed_base_electrical=VoltageVector_Wrap((float)calibration.direction*MOTOR_CONTROL_POLE_PAIRS*
                                        cycle_angle.mechanical_rad-calibration.offset);
   observed_correction=0.0f;
@@ -325,13 +341,44 @@ void FocVoltage_CurrentISR(const float currents[4],bool rails,
     observed_correction=-(float)h2_gain*
         (calibration.h2_cos_rad_elec*error_cos+calibration.h2_sin_rad_elec*error_sin);
   }
-  /* Preserve the original path exactly when disabled or gain is zero.
-   * Park and inverse Park share this one corrected snapshot. */
+  /* H2 is a spatial correction at the sensor reference time. Track this
+   * corrected electrical coordinate, including direction and pole pairs. */
   observed_electrical=observed_correction==0.0f ? observed_base_electrical :
       VoltageVector_Wrap(observed_base_electrical+observed_correction);
   /* The angle-based voltage API used to reject nonfinite angles. Keep that
    * protection before publishing a pair to the sin/cos-based output API. */
   if (!isfinite(observed_electrical)) { FocVoltage_TripISR("electrical angle invalid"); return; }
+  if (!MotorControl_GetFocTimesISR(&observation_sample_cycles,&observation_pwm_cycles)) {
+    FocVoltage_TripISR("angle prediction timing"); return;
+  }
+  if (!predictor_valid || predictor_h2!=h2_enabled || predictor_h2_gain!=h2_gain) {
+    AnglePredictor_Reset(&angle_predictor,observed_electrical);
+    predictor_cycles=cycle_angle.reference_cycles;
+    predictor_sequence=cycle_angle.sequence;
+    predictor_h2=h2_enabled; predictor_h2_gain=h2_gain;
+    predictor_valid=true;
+  } else if (predictor_sequence!=cycle_angle.sequence) {
+    float dt=(float)(uint32_t)(cycle_angle.reference_cycles-predictor_cycles)/(float)SystemCoreClock;
+    if (!AnglePredictor_Update(&angle_predictor,observed_electrical,dt,
+                               MOTOR_CONTROL_FOC_TRACKING_TAU_S)) {
+      FocVoltage_TripISR("angle velocity invalid"); return;
+    }
+    predictor_cycles=cycle_angle.reference_cycles;
+    predictor_sequence=cycle_angle.sequence;
+  }
+  /* Signed differences allow a newly published sensor read just after S/H.
+   * Freshness checks bound the deltas far below the DWT half-wrap interval. */
+  prediction_adc_seconds=(float)(int32_t)(observation_sample_cycles-predictor_cycles)/(float)SystemCoreClock;
+  prediction_pwm_seconds=(float)(int32_t)(observation_pwm_cycles-predictor_cycles)/(float)SystemCoreClock;
+  float horizon=MOTOR_CONTROL_FOC_ANGLE_MAX_AGE_US*1e-6f+2.0f*control_period;
+  if (fabsf(prediction_adc_seconds)>horizon || prediction_pwm_seconds<0.0f ||
+      prediction_pwm_seconds>horizon || !isfinite(angle_predictor.velocity)) {
+    FocVoltage_TripISR("angle prediction horizon"); return;
+  }
+  float prediction_scale=prediction_mode==1U ? 1.0f : 0.0f;
+  observed_electrical=AnglePredictor_At(&angle_predictor,prediction_adc_seconds*prediction_scale);
+  pwm_electrical=AnglePredictor_At(&angle_predictor,prediction_pwm_seconds*prediction_scale);
+  VoltageVector_SinCosWrapped(pwm_electrical,&pwm_sin,&pwm_cos);
   VoltageVector_SinCosWrapped(observed_electrical,&s,&c);
   observed_sin=s;
   observed_cos=c;
@@ -370,11 +417,11 @@ void FocVoltage_Task(void)
   if (!running) {
     /* PWMゼロ電圧のままSPIとADCの最初の周期を待つ。古いmain取得角で開始しない。 */
     if (adc_seen && sample.sequence!=angle_sequence &&
-        (uint32_t)(DWT->CYCCNT-sample.request_cycles)<(SystemCoreClock/1000000U)*MOTOR_CONTROL_FOC_ANGLE_MAX_AGE_US &&
+        (uint32_t)(DWT->CYCCNT-sample.reference_cycles)<(SystemCoreClock/1000000U)*MOTOR_CONTROL_FOC_ANGLE_MAX_AGE_US &&
         (uint32_t)(now-current_tick)<=2U) {
       uint32_t mask=__get_PRIMASK(); __disable_irq();
       if (!fault) {
-        angle_cycles=sample.request_cycles; angle_sequence=sample.sequence;
+        angle_cycles=sample.reference_cycles; angle_sequence=sample.sequence;
         previous_angle=sample.mechanical_rad; last_tick_cycles=0;
         running=true;
       }
@@ -393,8 +440,7 @@ static bool Start(bool (*permitted)(void))
       printf("FOC start blocked: config: %s\r\n",config_error); return false;
     }
     control_period=MotorControl_GetPeriodSeconds();
-    if (!ConfigValid() || (control_mode==CURRENT_CONTROL_MODE &&
-        (!isfinite(control_period) || control_period<=0.0f)) ||
+    if (!ConfigValid() || !isfinite(control_period) || control_period<=0.0f ||
         !MotorCalibration_Get(&calibration) ||
         !AS5047P_GetSample(&sample) || !BusVoltage_GetSample(&vm) || vm.overvoltage ||
         vm.volts<MOTOR_CONTROL_VM_MIN_VOLTS || !isfinite(vm.volts)) {
@@ -410,6 +456,7 @@ static bool Start(bool (*permitted)(void))
     if (permitted && !permitted()) return false;
     ResetCurrentControl();
     observation_valid=false;
+    predictor_valid=false;
     fault=NULL; active=true; running=false; adc_seen=false; adc_completed=false;
     applied_d=applied_q=peak=rpm=measured_d=measured_q=0.0f;
     ticks=compute_max=total_max=age_max=reverse_since=0;
@@ -441,6 +488,7 @@ static void PrintStatus(bool capture)
   static bool on,run;
   static FocControlMode mode;
   static float itd,itq,ird,irq,intd,intq;
+  static float prediction_adc, prediction_pwm, prediction_speed, park;
   static bool saturated;
   static const char *why;
   if(capture) {
@@ -453,6 +501,8 @@ static void PrintStatus(bool capture)
     ird=current_ref_d; irq=current_ref_q;
     intd=current_pi.integral_d; intq=current_pi.integral_q;
     saturated=current_pi.saturated;
+    prediction_adc=prediction_adc_seconds; prediction_pwm=prediction_pwm_seconds;
+    prediction_speed=angle_predictor.velocity; park=observed_electrical;
     __set_PRIMASK(mask);
     line=1; return;
   }
@@ -473,9 +523,12 @@ static void PrintStatus(bool capture)
   else if(line==4) MotorControl_PrintFocPhase();
   else if(line==5) printf("FOC PI: target=%ld/%ld mA, ref=%ld/%ld mA\r\n",
       (long)(itd*1000),(long)(itq*1000),(long)(ird*1000),(long)(irq*1000));
-  else printf("FOC PI: integral=%ld/%ld mV, saturated=%u\r\n",
+  else if(line==6) printf("FOC PI: integral=%ld/%ld mV, saturated=%u\r\n",
       (long)(intd*1000),(long)(intq*1000),(unsigned)saturated);
-  line=line==(mode==CURRENT_CONTROL_MODE ? 6U : 4U) ? 0 : line+1;
+  else printf("FOC prediction: adc=%ld ns, pwm_mid=%ld ns, omega_e=%ld mrad/s, park=%ld pwm=%ld mrad\r\n",
+      (long)(prediction_adc*1e9f),(long)(prediction_pwm*1e9f),
+      (long)(prediction_speed*1000),(long)(park*1000),(long)(e*1000));
+  line=line==7U ? 0U : (line==4U && mode!=CURRENT_CONTROL_MODE ? 7U : line+1U);
 }
 void FocVoltage_ReportTask(void) { PrintStatus(false); }
 bool FocVoltage_ProcessCommand(const char *command)

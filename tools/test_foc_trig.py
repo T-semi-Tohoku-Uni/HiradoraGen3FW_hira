@@ -5,7 +5,7 @@ import sys
 
 from test_current_pi import Firmware
 from unicorn import UC_HOOK_CODE
-from unicorn.arm_const import UC_ARM_REG_R0, UC_ARM_REG_PC, UC_ARM_REG_LR, UC_ARM_REG_S0
+from unicorn.arm_const import UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_PC, UC_ARM_REG_LR, UC_ARM_REG_S0
 
 
 def f32(x):
@@ -46,17 +46,20 @@ def test(before, after, factory=Firmware, pair_tolerance=0., duty_tolerance=2e-7
     # Real CurrentISR -> TickISR; mock only sensors/peripherals and output boundary.
     f = factory(after)
     output, trig_calls = [], []
-    sensor = struct.pack('<H2xffIIIIB3x', 100, .5, 3.5, 0, 0, 0, 42, 1)
+    sensor = struct.pack('<H2xffIIIIB3xI', 100, .5, 3.5, 0, 0, 0, 42, 1, 0)
     def stub(uc, address, size, data):
         name = data
         if name == 'AS5047P_GetSample':
             uc.mem_write(uc.reg_read(UC_ARM_REG_R0), sensor)
+        if name == 'MotorControl_GetFocTimesISR':
+            uc.mem_write(uc.reg_read(UC_ARM_REG_R0), struct.pack('<I', 0))
+            uc.mem_write(uc.reg_read(UC_ARM_REG_R1), struct.pack('<I', 12000))
         if name == 'MotorControl_SetVoltageSinCos':
             output.append(tuple(uc.reg_read(UC_ARM_REG_S0+i) for i in range(2)))
         uc.reg_write(UC_ARM_REG_R0, 0 if name == 'HAL_GetTick' else 1)
         uc.reg_write(UC_ARM_REG_PC, uc.reg_read(UC_ARM_REG_LR))
     for name in ('AS5047P_GetSample', 'HAL_GetTick', 'MotorControl_IsVoltageMode',
-                 'HAL_GPIO_ReadPin', 'MotorControl_SetVoltageSinCos'):
+                 'HAL_GPIO_ReadPin', 'MotorControl_SetVoltageSinCos', 'MotorControl_GetFocTimesISR'):
         addr = f.symbols[name] & ~1
         f.uc.hook_add(UC_HOOK_CODE, stub, user_data=name, begin=addr, end=addr)
     addr = f.symbols['arm_sin_cos_f32'] & ~1
@@ -72,11 +75,11 @@ def test(before, after, factory=Firmware, pair_tolerance=0., duty_tolerance=2e-7
         transaction_start = getattr(f, 'transactions', 0)
         f.call('FocVoltage_CurrentISR', f.STATE, 0)
         expected = tuple(struct.unpack('<I', f.uc.mem_read(f.foc[name], 4))[0]
-                         for name in ('observed_sin', 'observed_cos'))
+                         for name in ('pwm_sin', 'pwm_cos'))
         f.call('FocVoltage_TickISR')
         assert output[-1] == expected
         count = (f.transactions-transaction_start) if hasattr(f, 'transactions') else len(trig_calls)
-        assert count == (2 if enabled else 1), count
+        assert count == (3 if enabled else 2), count
     # Invalid observation must never publish a cached pair from the previous cycle.
     count = len(output)
     f.uc.mem_write(f.foc['observation_valid'], b'\0')
@@ -85,11 +88,11 @@ def test(before, after, factory=Firmware, pair_tolerance=0., duty_tolerance=2e-7
     f.uc.mem_write(f.foc['running'], b'\1')
     f.uc.mem_write(f.foc['fault'], bytes(4))
     f.command('foc h2 off')
-    sensor = struct.pack('<H2xffIIIIB3x', 100, math.nan, 3.5, 0, 0, 0, 43, 1)
+    sensor = struct.pack('<H2xffIIIIB3xI', 100, math.nan, 3.5, 0, 0, 0, 43, 1, 0)
     f.call('FocVoltage_CurrentISR', f.STATE, 0)
     assert not f.get('running', '<?') and not f.get('observation_valid', '<?')
     print(f'PASS: boundary/duty equivalence (max error={maximum}), invalid inputs, '
-          f'same-cycle pair, sincos counts H2 OFF=1/ON=2, stale/NaN rejection: {after}')
+          f'PWM pair, sincos counts H2 OFF=2/ON=3, stale/NaN rejection: {after}')
 
 
 if __name__ == '__main__':

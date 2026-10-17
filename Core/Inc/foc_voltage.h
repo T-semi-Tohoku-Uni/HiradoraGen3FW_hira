@@ -16,6 +16,8 @@ typedef struct {
    * cyclesはDWT（uint32_t周回）。ADC時刻はコールバック入口で、S/H時刻ではない。 */
   uint32_t adc_sequence, angle_sequence;
   uint32_t adc_callback_cycles, angle_request_cycles, angle_received_cycles;
+  uint32_t angle_reference_cycles, adc_sample_cycles, pwm_midpoint_cycles;
+  float pwm_electrical_rad, electrical_velocity_rad_s;
 } FocVoltage_Observation;
 bool FocVoltage_GetObservationISR(FocVoltage_Observation *observation);
 /* main専用。停止・異常・古い観測はfalse。電流PIを変更しない読み取りAPI。 */
