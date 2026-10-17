@@ -186,6 +186,7 @@ static bool Solve(float first, float far, float returned, CalibrationRecord *res
   CalibrationStore_Make(result,order,offset);
   return CalibrationStore_Valid(result);
 }
+#if CAL_ENABLE_TEST_COMMANDS
 /* 実機上で同じ演算コードを検査する。PWM/Flashには一切書かない。 */
 static void SelfTest(void)
 {
@@ -252,6 +253,7 @@ static void SelfTest(void)
   checks++; if (memcmp(&good,&before,sizeof(good)) != 0) failures++;
   printf("Calibration selftest: %u checks, %u failures (no PWM/Flash writes)\r\n",checks,failures);
 }
+#endif
 bool MotorCalibration_ProcessCommand(const char *command)
 {
   while (isspace((unsigned char)*command)) command++;
@@ -260,6 +262,7 @@ bool MotorCalibration_ProcessCommand(const char *command)
       (command[3] && !isspace((unsigned char)command[3]))) return false;
   const char *arg=command+3; while (isspace((unsigned char)*arg)) arg++;
   if (Same(arg,"status") || !*arg) PrintStatus();
+#if CAL_ENABLE_TEST_COMMANDS
   else if (Same(arg,"test")) {
     if (MotorCalibration_IsActive() || !MotorControl_IsStopped() || CurrentSense_IsBusy())
       printf("Selftest requires stopped PWM and ADC\r\n");
@@ -269,7 +272,9 @@ bool MotorCalibration_ProcessCommand(const char *command)
         !MotorControl_IsStopped() || CurrentSense_IsBusy())
       printf("Trig test requires stopped FOC/PWM/calibration/ADC log\r\n");
     else VoltageVector_TrigTest();
-  } else if (Same(arg,"stop")) {
+  }
+#endif
+  else if (Same(arg,"stop")) {
     MotorCalibration_Stop();
   } else if (Same(arg,"save")) {
     if (!calibrated || MotorCalibration_IsActive() || !MotorControl_IsStopped() || CurrentSense_IsBusy()) {
@@ -330,7 +335,11 @@ bool MotorCalibration_ProcessCommand(const char *command)
     operation = CAL_OP_NORMAL; Enter(CHECK_STILL, task_ms);
     printf("Manual calibration started: free rotor required, max %.2f V / %.2f A; stop aborts\r\n",
            (double)MOTOR_CONTROL_CAL_VOLTAGE, (double)MOTOR_CONTROL_CAL_CURRENT_LIMIT_A);
-  } else printf("Usage: cal start | cal map | cal map apply | cal status | cal stop | cal save | cal test | cal trig test\r\n");
+  } else printf("Usage: cal start | cal map | cal map apply | cal status | cal stop | cal save"
+#if CAL_ENABLE_TEST_COMMANDS
+                " | cal test | cal trig test"
+#endif
+                "\r\n");
   return true;
 }
 static void StartMap(void)

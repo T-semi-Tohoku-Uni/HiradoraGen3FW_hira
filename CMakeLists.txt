@@ -28,6 +28,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 project(${CMAKE_PROJECT_NAME})
 option(FOC_USE_CORDIC "Use STM32 CORDIC for voltage-vector sin/cos" ON)
 option(FOC_ANGLE_PREDICTION "Advance observer angle to ADC/PWM target times" ON)
+option(CAL_ENABLE_TEST_COMMANDS "Include cal test and cal trig test diagnostics" OFF)
 message("Build type: " ${CMAKE_BUILD_TYPE})
 
 # Enable CMake support for ASM and C languages
@@ -40,6 +41,7 @@ string(REPLACE "STM32G431xx_FLASH.ld" "STM32G431xx_CAL_FLASH.ld" CMAKE_EXE_LINKE
 # Create an executable object type
 add_executable(${CMAKE_PROJECT_NAME})
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE FOC_ANGLE_PREDICTION=$<BOOL:${FOC_ANGLE_PREDICTION}>)
+target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE CAL_ENABLE_TEST_COMMANDS=$<BOOL:${CAL_ENABLE_TEST_COMMANDS}>)
 
 set_property(TARGET ${CMAKE_PROJECT_NAME} APPEND PROPERTY LINK_DEPENDS "${CMAKE_SOURCE_DIR}/STM32G431xx_CAL_FLASH.ld")
 
@@ -63,7 +65,6 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/angle_predictor.c
     Core/Src/current_pi.c
     Core/Src/voltage_vector.c
-    Core/Src/trig_benchmark.c
     Core/Src/calibration_store.c
     Core/Src/h2_fit.c
     Core/Src/motor_calibration.c
@@ -76,6 +77,10 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/ntc.c
     Core/Src/stspin32g4.c
 )
+
+if(CAL_ENABLE_TEST_COMMANDS)
+    target_sources(${CMAKE_PROJECT_NAME} PRIVATE Core/Src/trig_benchmark.c)
+endif()
 
 # Add include paths
 # CAN追加分はDebugでもサイズを抑え、校正Flash領域を維持する。
