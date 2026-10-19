@@ -9,7 +9,7 @@
             "runEntry": "main",
             "imagesAndSymbols": [
                 {
-                    "imageFileName": "${workspaceFolder}/build/Debug/HiradoraGen3FW.elf"
+                    "imageFileName": "${workspaceFolder}/build/Release/HiradoraGen3FW.elf"
                 }
             ],
             "verbose": false
