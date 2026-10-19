@@ -69,7 +69,6 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/h2_fit.c
     Core/Src/motor_calibration.c
     Core/Src/bus_voltage.c
-    Core/Src/as5047p.c
     Core/Src/as5600.c
     Core/Src/console.c
     Core/Src/current_sense.c
@@ -92,7 +91,6 @@ set_source_files_properties(Core/Src/main.c Core/Src/stm32g4xx_hal_msp.c Core/Sr
     PROPERTIES COMPILE_OPTIONS "-Os")
 set_source_files_properties(
     ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_fdcan.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_i2c.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_uart.c
     TARGET_DIRECTORY STM32_Drivers
     PROPERTIES COMPILE_OPTIONS "-Os")
@@ -128,11 +126,11 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
 # Debugでも同じ演算経路を使うため、これらの周期処理ファイルは-O2でビルドする。
 set_source_files_properties(
     Core/Src/foc_voltage.c Core/Src/angle_predictor.c Core/Src/voltage_vector.c Core/Src/trig_benchmark.c Core/Src/current_pi.c
-    Core/Src/as5047p.c Core/Src/current_sense.c Core/Src/motor_control.c
+    Core/Src/as5600.c Core/Src/current_sense.c Core/Src/motor_control.c
     Drivers/CMSIS/DSP/Source/ControllerFunctions/arm_sin_cos_f32.c
     PROPERTIES COMPILE_OPTIONS "-O2")
 
-# SPI応答を次のTIM/ADC IRQより前に処理する余裕をDebugでも確保する。
+# I2C応答を次のTIM/ADC IRQより前に処理する余裕をDebugでも確保する。
 # FOC本体だけでなくHALディスパッチとIRQ入口/出口も周期処理の時間に含まれる。
 # CubeMX生成コード自体は変更しない。ReleaseでもHAL/IRQを速度優先にする。
 # 対象ファイルのDebugステップ順は変わり得る。
@@ -143,6 +141,7 @@ set_source_files_properties(
     ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_adc.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_adc_ex.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_tim.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_i2c.c
     TARGET_DIRECTORY STM32_Drivers
     PROPERTIES COMPILE_OPTIONS "-O2")
 

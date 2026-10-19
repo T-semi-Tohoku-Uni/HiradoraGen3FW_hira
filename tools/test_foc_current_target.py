@@ -32,32 +32,32 @@ def test(path):
         close(f.get('current_target_d', '<f'), d)
         close(f.get('current_target_q', '<f'), q)
 
-    target(0, 15)
-    values(0, 15)
+    target(0, 9)
+    values(0, 9)
     assert not f.call('FocVoltage_IsActive')
     assert not f.call('FocVoltage_IsRunning')
-    # 既存上限15Aは各軸別でなくベクトル長に適用される。
-    target(9, 12)
-    for d, q in ((0, 15.01), (0, -15.01), (12, 12), (float('nan'), 0),
+    # 9 A command limit is on vector magnitude, below the 10 A phase trip.
+    target(5.4, 7.2)
+    for d, q in ((0, 9.01), (0, -9.01), (7, 7), (float('nan'), 0),
                  (0, float('inf')), (float('-inf'), 0), (1e30, 1e30)):
         target(d, q, False)
-        values(9, 12)
+        values(5.4, 7.2)
     calibration_active = True
     target(0, 0, False)
-    values(9, 12)
+    values(5.4, 7.2)
     calibration_active = False
 
     set_state('active', True, '<?')
     set_state('control_mode', 0)
     target(0, 0, False)
     assert f.get('control_mode', '<I') == 0
-    values(9, 12)
+    values(5.4, 7.2)
     set_state('control_mode', 1)
     # 運転中の更新でランプ現在値や積分器をリセットしない。
     set_state('current_ref_d', 0.25, '<f')
     set_state('current_ref_q', 0.5, '<f')
     set_state('current_pi', 0.75, '<f')
-    for q in (0, -15, 15):
+    for q in (0, -9, 9):
         target(0, q)
         values(0, q)
         close(f.get('current_ref_d', '<f'), 0.25)

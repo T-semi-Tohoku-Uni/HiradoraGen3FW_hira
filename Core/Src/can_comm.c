@@ -1,7 +1,7 @@
 #include "can_comm.h"
 #include "can_protocol.h"
 #include "console.h"
-#include "as5047p.h"
+#include "as5600.h"
 #include "can_telemetry.h"
 #include "foc_voltage.h"
 #include "ntc.h"
@@ -300,13 +300,15 @@ void CanComm_Task(void)
   uint32_t irq_mask = __get_PRIMASK(); __disable_irq();
   if (HAL_FDCAN_GetRxFifoFillLevel(can, FDCAN_RX_FIFO0) == 0U) fifo_empty_ms = now;
   __set_PRIMASK(irq_mask);
-  AS5047P_Sample sample;
-  angle_valid = AS5047P_GetSample(&sample);
+  AS5600_Sample sample;
+  angle_valid = AS5600_GetSample(&sample);
   if (!angle_valid) {
     telemetry = (CanTelemetry){0};
     telemetry_sequence = 0;
   } else if (sample.sequence != telemetry_sequence) {
-    CanTelemetry_Update(&telemetry, sample.raw, sample.request_cycles, SystemCoreClock);
+    /* Preserve the protocol's 14-bit internal / 13-bit wire angle units.
+     * Shifting maps the 12-bit input; it does not add sensor resolution. */
+    CanTelemetry_Update(&telemetry, (uint16_t)(sample.raw << 2U), sample.reference_cycles, SystemCoreClock);
     telemetry_sequence = sample.sequence;
   }
   if ((uint32_t)(now - tx_ms) >= CAN_FEEDBACK_PERIOD_MS) {

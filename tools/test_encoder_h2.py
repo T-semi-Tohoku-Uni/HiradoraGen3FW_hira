@@ -17,7 +17,7 @@ def test(path, factory=Firmware):
     sensor = bytes(36)
 
     def stub(uc, address, size, data):
-        if address == (f.symbols['AS5047P_GetSample'] & ~1):
+        if address == (f.symbols['AS5600_GetSample'] & ~1):
             uc.mem_write(uc.reg_read(UC_ARM_REG_R0), sensor)
             uc.reg_write(UC_ARM_REG_R0, 1)
         elif address == (f.symbols['MotorControl_GetFocTimesISR'] & ~1):
@@ -28,7 +28,7 @@ def test(path, factory=Firmware):
             uc.reg_write(UC_ARM_REG_R0, 0)
         uc.reg_write(UC_ARM_REG_PC, uc.reg_read(UC_ARM_REG_LR))
 
-    for name in ('AS5047P_GetSample', 'HAL_GetTick', 'MotorControl_GetFocTimesISR'):
+    for name in ('AS5600_GetSample', 'HAL_GetTick', 'MotorControl_GetFocTimesISR'):
         address = f.symbols[name] & ~1
         f.uc.hook_add(UC_HOOK_CODE, stub, begin=address, end=address)
     f.uc.mem_write(f.foc['active'], b'\x01')

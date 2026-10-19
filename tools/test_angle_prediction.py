@@ -31,13 +31,13 @@ def test(path):
         f.call('AnglePredictor_Reset', f.STATE, floats=(6.27,))
         angle = 6.27
         for i in range(500):
-            dt = .00015 if i % 23 == 0 else .00005
+            dt = .0006 if i % 23 == 0 else .0002
             angle += speed*dt
-            measurement = round((angle % (2*math.pi)) / (7*2*math.pi/16384)) * (7*2*math.pi/16384)
+            measurement = round((angle % (2*math.pi)) / (7*2*math.pi/4096)) * (7*2*math.pi/4096)
             assert f.call('AnglePredictor_Update', f.STATE, floats=(measurement, dt, .0005))
         for horizon in (-.00001, .000075, .00030):
             f.call('AnglePredictor_At', f.STATE, floats=(horizon,))
-            assert abs(delta(result(), angle+speed*horizon)) < .003
+            assert abs(delta(result(), angle+speed*horizon)) < .012
     for args in ((math.nan,.00005,.0005), (0,0,.0005), (0,.002,.0005), (0,.00005,0)):
         assert not f.call('AnglePredictor_Update', f.STATE, floats=args)
     f.call('AnglePredictor_Reset', f.STATE, floats=(0.,))
@@ -76,13 +76,13 @@ def test(path):
     sensor = b''
     output = []
     def stub(uc, address, size, name):
-        if name == 'AS5047P_GetSample':
+        if name == 'AS5600_GetSample':
             uc.mem_write(uc.reg_read(UC_ARM_REG_R0), sensor)
         if name == 'MotorControl_SetVoltageSinCos':
             output.append(tuple(struct.unpack('<f', struct.pack('<I', uc.reg_read(UC_ARM_REG_S0+i)))[0] for i in range(2)))
         uc.reg_write(UC_ARM_REG_R0, 0 if name == 'HAL_GetTick' else 1)
         uc.reg_write(UC_ARM_REG_PC, uc.reg_read(UC_ARM_REG_LR))
-    for name in ('AS5047P_GetSample', 'AS5047P_Tick', 'HAL_GetTick', 'MotorControl_IsVoltageMode',
+    for name in ('AS5600_GetSample', 'AS5600_Tick', 'HAL_GetTick', 'MotorControl_IsVoltageMode',
                  'HAL_GPIO_ReadPin', 'MotorControl_SetVoltageSinCos'):
         address=f.symbols[name] & ~1
         f.uc.hook_add(UC_HOOK_CODE, stub, user_data=name, begin=address, end=address)
@@ -102,9 +102,9 @@ def test(path):
             put(f.foc['angle_cycles'], 0xffff0000)
             fp(f.foc['previous_angle'], .5)
             for i in range(1, 151):
-                ref=(0xffff0000+i*8000) & 0xffffffff
+                ref=(0xffff0000+i*32000) & 0xffffffff
                 top=(ref+6000) & 0xffffffff
-                mech=.5+i*.001
+                mech=.5+i*.004
                 sensor=struct.pack('<H2xffIIIIB3xI', 100, mech, mech*7, (ref-600)&0xffffffff,
                                    (ref+1000)&0xffffffff, 0, i, 1, ref)
                 put(f.symbols['foc_adc_began'], top+300)
@@ -129,7 +129,7 @@ def test(path):
             assert bytes(f.uc.mem_read(f.foc['angle_predictor'],8)) == before
     # Age protection remains based on actual acquisition, never predicted time.
     count=len(output)
-    put(0xe0001004, ref+50000)
+    put(0xe0001004, ref+130000)
     f.call('FocVoltage_CurrentISR', f.STATE, 0)
     f.call('FocVoltage_TickISR')
     assert not f.get('running','<?') and len(output)==count

@@ -1,4 +1,4 @@
-"""Run real CurrentISR and ADC tail: next SPI request follows valid snapshot once."""
+"""Run real CurrentISR and ADC tail: next AS5600 request follows the snapshot once."""
 import struct
 import sys
 from test_current_pi import Firmware
@@ -32,15 +32,15 @@ def test(path):
             events.append('park'); return
         events.append(name)
         result = 0
-        if name == 'AS5047P_GetSample':
+        if name == 'AS5600_GetSample':
             uc.mem_write(uc.reg_read(UC_ARM_REG_R0), sensor)
             result = int(valid)
-        elif name == 'AS5047P_Tick':
+        elif name == 'AS5600_Tick':
             # Simulate newly published sensor data: existing FOC copy must not change.
             sensor = struct.pack('<H2xffIIIIB3xI',200,1.,.7168,0,0,0,43,1,0)
         uc.reg_write(UC_ARM_REG_R0, result)
         uc.reg_write(UC_ARM_REG_PC, uc.reg_read(UC_ARM_REG_LR))
-    for name in ('AS5047P_GetSample','AS5047P_Tick','HAL_GetTick',
+    for name in ('AS5600_GetSample','AS5600_Tick','HAL_GetTick',
                  'FocVoltage_TickISR','VoltageVector_SinCosWrapped'):
         addr=f.symbols[name]&~1
         f.uc.hook_add(UC_HOOK_CODE,hook,user_data=name,begin=addr,end=addr)
@@ -48,16 +48,16 @@ def test(path):
     f.call('FocVoltage_CurrentISR', f.STATE, 0)
     assert bytes(f.uc.mem_read(f.foc['cycle_angle'],36)) == original
     f.call('MotorControl_FocAdcISR')
-    assert events.count('AS5047P_Tick') == 1, events
-    assert events.index('AS5047P_GetSample') < events.index('AS5047P_Tick') < events.index('park') < events.index('FocVoltage_TickISR')
+    assert events.count('AS5600_Tick') == 1, events
+    assert events.index('AS5600_GetSample') < events.index('AS5600_Tick') < events.index('park') < events.index('FocVoltage_TickISR')
     # Startup still acquires at the tail when no running snapshot is available.
     events.clear()
     f.uc.mem_write(f.foc['running'],b'\0')
     f.call('FocVoltage_CurrentISR', f.STATE, 0)
-    assert 'AS5047P_Tick' not in events
+    assert 'AS5600_Tick' not in events
     f.call('MotorControl_FocAdcISR')
-    assert events.count('AS5047P_Tick') == 1
-    assert events.index('FocVoltage_TickISR') < events.index('AS5047P_Tick')
+    assert events.count('AS5600_Tick') == 1
+    assert events.index('FocVoltage_TickISR') < events.index('AS5600_Tick')
     for failure in ('invalid','stale'):
         events.clear()
         put(f.foc['fault'],0)
@@ -66,7 +66,7 @@ def test(path):
         if failure == 'stale':
             sensor=struct.pack('<H2xffIIIIB3xI',100,.5,3.5,0xfe000000,0,0,44,1,0xfe000000)
         f.call('FocVoltage_CurrentISR',f.STATE,0)
-        assert 'AS5047P_Tick' not in events and not f.get('running','<?')
+        assert 'AS5600_Tick' not in events and not f.get('running','<?')
     print(f'PASS: snapshot/request/Park order, no duplicate tail request, arming fallback, invalid/stale guards: {path}')
 
 

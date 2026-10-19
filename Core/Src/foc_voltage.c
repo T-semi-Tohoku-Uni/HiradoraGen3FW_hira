@@ -2,7 +2,7 @@
 #include "motor_control.h"
 #include "motor_calibration.h"
 #include "motor_control_config.h"
-#include "as5047p.h"
+#include "as5600.h"
 #include "bus_voltage.h"
 #include "current_sense.h"
 #include "voltage_vector.h"
@@ -61,7 +61,7 @@ static float observed_base_electrical, observed_correction;
 static volatile bool h2_enabled; /* Boot OFF; no Flash persistence. */
 static volatile int h2_gain = 1;
 /* 同一ADC周期でPark変換と電圧生成が参照する、不変の角度スナップショット。 */
-static AS5047P_Sample cycle_angle;
+static AS5600_Sample cycle_angle;
 static uint32_t observation_adc_sequence, observation_adc_cycles;
 static bool observation_valid;
 bool FocVoltage_GetIqSample(float *iq_a)
@@ -248,7 +248,7 @@ void FocVoltage_TickISR(void)
   if (HAL_GPIO_ReadPin(GPIOE,GPIO_PIN_15)==GPIO_PIN_RESET) { FocVoltage_TripISR("gate driver nFAULT"); return; }
   /* CurrentISRで取得・検証済み。ここで再取得するとdq電流と出力角がずれる。 */
   if (!observation_valid) { FocVoltage_TripISR("current observation invalid"); return; }
-  const AS5047P_Sample *sample=&cycle_angle;
+  const AS5600_Sample *sample=&cycle_angle;
   uint32_t age=began-sample->reference_cycles;
   if (age>age_max) age_max=age;
   if (age>(SystemCoreClock/1000000U)*MOTOR_CONTROL_FOC_ANGLE_MAX_AGE_US) {
@@ -259,7 +259,7 @@ void FocVoltage_TickISR(void)
     if (elapsed) {
       float speed=Difference(sample->mechanical_rad,previous_angle)*
           (60.0f/TWO_PI)*(float)SystemCoreClock/(float)elapsed;
-      /* 14bitの量子化を20kHzで差分すると速度に段差が出るため平滑化する。 */
+      /* Smooth the speed steps due to the 12-bit angle quantization. */
       rpm+=(speed-rpm)*(1.0f/64.0f);
     }
     angle_cycles=sample->reference_cycles; angle_sequence=sample->sequence;
@@ -283,7 +283,7 @@ void FocVoltage_TickISR(void)
   electrical=pwm_electrical;
   /* UVW座標で負の相順ならqも反転し、encoder増加方向のトルクを正にする。
    * Predict to next top + half a PWM period; Park uses the ADC sample time.
-   * DAEC is already applied by the sensor: no core propagation delay added. */
+   * AS5600 reference is approximate: internal/filter delay remains unmeasured. */
   if (!MotorControl_SetVoltageSinCos(pwm_sin,pwm_cos,applied_d,
       applied_q*(float)calibration.direction,vm_cache)) {
     FocVoltage_TripISR("voltage output rejected"); return;
@@ -313,14 +313,14 @@ void FocVoltage_CurrentISR(const float currents[4],bool rails,
   }
   adc_seen=true;
   if (!running) return; /* 起動準備中は電流保護だけ行い、観測値を公開しない。 */
-  if (!AS5047P_GetSample(&cycle_angle)) { FocVoltage_TripISR("encoder invalid"); return; }
+  if (!AS5600_GetSample(&cycle_angle)) { FocVoltage_TripISR("encoder invalid"); return; }
   uint32_t age=DWT->CYCCNT-cycle_angle.reference_cycles;
   if (age>(SystemCoreClock/1000000U)*MOTOR_CONTROL_FOC_ANGLE_MAX_AGE_US) {
     FocVoltage_TripISR("encoder age limit"); return;
   }
   /* Snapshot is fixed for this ADC cycle. Start the next request before Park/PI;
    * DMA response handling remains lower priority and cannot replace this copy. */
-  AS5047P_Tick();
+  AS5600_Tick();
   observation_adc_sequence=adc_sequence;
   observation_adc_cycles=adc_callback_cycles;
   /* 3相の共通成分を除いてClarke変換する。電流PIも同じdq観測を使用。
@@ -330,7 +330,7 @@ void FocVoltage_CurrentISR(const float currents[4],bool rails,
   float w=currents[3]*MOTOR_CONTROL_FOC_CURRENT_POLARITY;
   float a=(2.0f*u-v-w)/3.0f, b=(v-w)/1.732050808f;
   float c,s;
-  /* Calibrate at the sensor latch time, then predict separately to ADC/PWM. */
+  /* Calibrate at the approximate read reference, then predict to ADC/PWM. */
   observed_base_electrical=VoltageVector_Wrap((float)calibration.direction*MOTOR_CONTROL_POLE_PAIRS*
                                        cycle_angle.mechanical_rad-calibration.offset);
   observed_correction=0.0f;
@@ -388,8 +388,8 @@ void FocVoltage_CurrentISR(const float currents[4],bool rails,
 }
 void FocVoltage_Task(void)
 {
-  AS5047P_Sample sample;
-  bool angle_ok=AS5047P_GetSample(&sample);
+  AS5600_Sample sample;
+  bool angle_ok=AS5600_GetSample(&sample);
   uint32_t now=HAL_GetTick();
   if (!active) {
     if (!MotorControl_IsStopped() || !angle_ok) { still_tracking=false; return; }
@@ -415,7 +415,7 @@ void FocVoltage_Task(void)
   }
   vm_cache=vm.volts; heartbeat=now;
   if (!running) {
-    /* PWMゼロ電圧のままSPIとADCの最初の周期を待つ。古いmain取得角で開始しない。 */
+    /* Wait for a fresh AS5600/ADC cycle at zero voltage; do not use the old main sample. */
     if (adc_seen && sample.sequence!=angle_sequence &&
         (uint32_t)(DWT->CYCCNT-sample.reference_cycles)<(SystemCoreClock/1000000U)*MOTOR_CONTROL_FOC_ANGLE_MAX_AGE_US &&
         (uint32_t)(now-current_tick)<=2U) {
@@ -434,7 +434,7 @@ static bool Start(bool (*permitted)(void))
     if (active || MotorCalibration_IsActive() || !MotorControl_IsStopped() || CurrentSense_IsBusy()) {
       printf("FOC start blocked: stop PWM/calibration/ADC log first\r\n"); return false;
     }
-    AS5047P_Sample sample; BusVoltageSample vm;
+    AS5600_Sample sample; BusVoltageSample vm;
     const char *config_error=CurrentConfigError();
     if (control_mode==CURRENT_CONTROL_MODE && config_error) {
       printf("FOC start blocked: config: %s\r\n",config_error); return false;
@@ -442,7 +442,7 @@ static bool Start(bool (*permitted)(void))
     control_period=MotorControl_GetPeriodSeconds();
     if (!ConfigValid() || !isfinite(control_period) || control_period<=0.0f ||
         !MotorCalibration_Get(&calibration) ||
-        !AS5047P_GetSample(&sample) || !BusVoltage_GetSample(&vm) || vm.overvoltage ||
+        !AS5600_GetSample(&sample) || !BusVoltage_GetSample(&vm) || vm.overvoltage ||
         vm.volts<MOTOR_CONTROL_VM_MIN_VOLTS || !isfinite(vm.volts)) {
       printf("FOC start blocked: config/calibration/encoder/VM invalid\r\n"); return false;
     }

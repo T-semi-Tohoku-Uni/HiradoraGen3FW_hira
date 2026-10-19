@@ -109,7 +109,7 @@ class SyntheticMap(MapFirmware):
         super().__init__(path)
         self.reverse=False
         self.saved_record=None
-        for name in ('Console_Flush','AS5047P_Pause','AS5047P_Resume'):
+        for name in ('Console_Flush','AS5600_Pause','AS5600_Resume'):
             address=self.symbols[name] & ~1
             self.uc.hook_add(UC_HOOK_CODE,self.hook(lambda:0),begin=address,end=address)
 

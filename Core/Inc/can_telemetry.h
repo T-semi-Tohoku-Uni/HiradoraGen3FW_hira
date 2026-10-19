@@ -2,7 +2,8 @@
 #define CAN_TELEMETRY_H
 #include <stdbool.h>
 #include <stdint.h>
-/* main専用。正方向はAS5047Pの生機械角増加方向（校正方向とは独立）。 */
+/* main only. Input is normalized to 14 bits/turn; AS5600 raw is shifted by 2.
+ * Positive is increasing raw mechanical angle, independent of calibration. */
 typedef struct {
   uint32_t previous_cycles, window_cycles;
   int32_t counts;

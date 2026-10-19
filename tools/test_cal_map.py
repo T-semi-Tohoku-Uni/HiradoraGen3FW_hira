@@ -65,7 +65,7 @@ class Firmware:
             'MotorControl_SetVoltage': self.voltage,
             'CurrentSense_BeginControl': self.begin_adc,
             'CurrentSense_EndControl': self.end_adc,
-            'AS5047P_GetSample': self.encoder,
+            'AS5600_GetSample': self.encoder,
             'BusVoltage_GetSample': self.bus,
             'CalibrationStore_Load': self.load,
             'CalibrationStore_IsCurrentFormat': lambda: True,
@@ -165,7 +165,8 @@ class Firmware:
     def encoder(self):
         if self.fresh:
             self.seq += 1
-        self.uc.mem_write(self.r0(), struct.pack('<H2xffIIII?3x', 0, self.raw, 0, 0, 0, self.tick, self.seq, self.valid))
+        self.uc.mem_write(self.r0(), struct.pack('<H2xffIIII?3xI', 0, self.raw, 0, 0, 0,
+            self.tick, self.seq, self.valid, (self.tick*160000) & 0xffffffff))
         return self.valid
 
     def bus(self):

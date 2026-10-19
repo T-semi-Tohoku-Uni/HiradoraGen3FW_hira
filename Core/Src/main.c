@@ -279,8 +279,8 @@ int main(void)
     printf("Motor initialized; PWM stopped (explicit start required)\r\n");
 #endif
   }
-  /* AS5047P/FOC stays uninitialized: AS5600 bring-up is observation only. */
-  AS5600_Init(&hi2c1);
+  /* AS5600 feeds calibration/FOC; PWM remains blocked pending hardware validation. */
+  AS5600_Init(&hi2c1, &htim1);
   MotorCalibration_Init();
   CanComm_Init(&hfdcan1); /* CAN駆動は明示armと新しいゼロ指令を必要とする。 */
   printf("Command: <offset>, u/v/w <offset>, mid, stop, start, "
@@ -642,7 +642,7 @@ static void MX_I2C1_Init(void)
 
   /* USER CODE END I2C1_Init 1 */
   hi2c1.Instance = I2C1;
-  hi2c1.Init.Timing = 0x10F32A82;
+  hi2c1.Init.Timing = 0x10F0267E;
   hi2c1.Init.OwnAddress1 = 0;
   hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
   hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
@@ -664,7 +664,7 @@ static void MX_I2C1_Init(void)
 
   /** Configure Digital filter
   */
-  if (HAL_I2CEx_ConfigDigitalFilter(&hi2c1, 0) != HAL_OK)
+  if (HAL_I2CEx_ConfigDigitalFilter(&hi2c1, 8) != HAL_OK)
   {
     Error_Handler();
   }
@@ -1133,6 +1133,11 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+void I2C1_Reinitialize(void)
+{
+  /* Reuse CubeMX settings after the stopped encoder recovery deinitializes I2C. */
+  MX_I2C1_Init();
+}
 
 /* USER CODE END 4 */
 

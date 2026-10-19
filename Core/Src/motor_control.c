@@ -1,5 +1,5 @@
 #include "motor_control.h"
-#include "as5047p.h"
+#include "as5600.h"
 #include "voltage_vector.h"
 #include "motor_calibration.h"
 #include "foc_voltage.h"
@@ -981,7 +981,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     FocVoltage_WatchdogISR();
     return;
   }
-  AS5047P_Tick();
+  AS5600_Tick();
   if (MotorControl_IsVoltageMode()) {
     __HAL_TIM_SET_COMPARE(motor_timer, TIM_CHANNEL_1, voltage_compare[0]);
     __HAL_TIM_SET_COMPARE(motor_timer, TIM_CHANNEL_2, voltage_compare[1]);
@@ -1081,7 +1081,7 @@ void MotorControl_FocAdcISR(void)
   if (MotorControl_IsVoltageMode()) {
     /* Running FOC requested after its angle copy. Arming still needs acquisition
      * here, because CurrentISR returns before taking a control snapshot. */
-    if (!FocVoltage_IsRunning()) AS5047P_Tick();
+    if (!FocVoltage_IsRunning()) AS5600_Tick();
     FocVoltage_AdcCompleteISR();
   }
 }
@@ -1092,9 +1092,6 @@ void MotorControl_FocAdcBeginISR(void)
   if (!FocVoltage_IsActive()) return;
   uint32_t mask=__get_PRIMASK(); __disable_irq();
   foc_adc_began=DWT->CYCCNT;
-#ifdef ENCODER_TIMING_PROBE
-  AS5047P_TimingAdcBegin();
-#endif
   uint32_t arr=__HAL_TIM_GET_AUTORELOAD(motor_timer);
   bool down_before;
   do {

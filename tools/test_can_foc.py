@@ -40,7 +40,7 @@ def test(path):
         elif address == (f.symbols['HAL_GPIO_ReadPin'] & ~1): result = 1
         uc.reg_write(UC_ARM_REG_R0, result)
         uc.reg_write(UC_ARM_REG_PC, uc.reg_read(UC_ARM_REG_LR))
-    for name in ('Foc_StartCurrent', 'HAL_GPIO_ReadPin', 'AS5047P_GetSample',
+    for name in ('Foc_StartCurrent', 'HAL_GPIO_ReadPin', 'AS5600_GetSample',
                  'HAL_FDCAN_GetRxFifoFillLevel'):
         address = f.symbols[name] & ~1
         f.uc.hook_add(UC_HOOK_CODE, stub, begin=address, end=address)
@@ -51,7 +51,7 @@ def test(path):
     state()
     f.call('CanComm_Task')
     assert calls == ['start']
-    for raw, expected in ((8192, 10), (16384, 15), (-32768, -15), (0, 0)):
+    for raw, expected in ((8192, 9), (16384, 9), (-32768, -9), (0, 0)):
         state(raw=raw)
         f.call('CanComm_Task')
         close(f.get('current_target_d', '<f'), 0)

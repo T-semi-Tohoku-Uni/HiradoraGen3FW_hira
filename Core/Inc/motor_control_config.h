@@ -1,28 +1,31 @@
 #ifndef MOTOR_CONTROL_CONFIG_H
 #define MOTOR_CONTROL_CONFIG_H
 
-/* AS5600 angle acquisition bring-up: block every PWM start, including bootstrap. */
-#define MOTOR_CONTROL_ANGLE_ACQUISITION_ONLY         1
+/* User authorized energized calibration/FOC on 2026-10-20. No external load:
+ * use low initial voltage, reduced speed and current-mode voltage limits. */
+#define MOTOR_CONTROL_ANGLE_ACQUISITION_ONLY         0
 
-/* Motor and open-loop six-step parameters. */
+/* 360 KV motor, AS5600 on motor shaft.
+ * User counted 12 coils and 14 rotor magnets: 7 pole pairs (2026-10-20). */
 #define MOTOR_CONTROL_POLE_PAIRS                    7U
 
 /* 角度通信の締切と鮮度。TIM1停止中はmainから低頻度取得する。 */
-#define MOTOR_CONTROL_ENCODER_TIMEOUT_US            100U
+#define MOTOR_CONTROL_ENCODER_TIMEOUT_US            300U
+#define MOTOR_CONTROL_ENCODER_SAMPLE_PERIOD_US      200U
 #define MOTOR_CONTROL_ENCODER_STALE_MS              10U
 #define MOTOR_CONTROL_ENCODER_DIAG_PERIOD_MS        20U
 #define MOTOR_CONTROL_ENCODER_DIAG_STALE_MS         100U
 
 /* モーター交換・相配線変更時はIDを変更し、必ず手動で再校正する。 */
-#define MOTOR_CONTROL_MOTOR_ID                     1U
-#define MOTOR_CONTROL_KV_RPM_PER_VOLT               140.0f
+#define MOTOR_CONTROL_MOTOR_ID                     2U
+#define MOTOR_CONTROL_KV_RPM_PER_VOLT               360.0f
 /* 定格不明のため、以下は実験用保護値。KVから許容電流は推定しない。
  * CURRENT_LIMIT_AはFOC通常運転用。校正にはCAL_CURRENT_LIMIT_Aを使う。
  * いずれも電流指令値ではなく、超過時に出力を停止する閾値。 */
-#define MOTOR_CONTROL_CURRENT_LIMIT_A              20.0f
-#define MOTOR_CONTROL_CAL_CURRENT_LIMIT_A          15.0f
-/* N5065実測：1V/10Aで7回完走、最大約8.41A。通常運転用閾値とは独立。 */
-#define MOTOR_CONTROL_CAL_VOLTAGE                   1.0f
+#define MOTOR_CONTROL_CURRENT_LIMIT_A              10.0f
+#define MOTOR_CONTROL_CAL_CURRENT_LIMIT_A          10.0f
+/* Conservative initial alignment voltage for the unloaded 360 KV motor. */
+#define MOTOR_CONTROL_CAL_VOLTAGE                   0.3f
 #define MOTOR_CONTROL_VM_MIN_VOLTS                 6.0f
 #define MOTOR_CONTROL_VOLTAGE_LIMIT                 8.0f
 #define MOTOR_CONTROL_PWM_MARGIN                   0.05f
@@ -41,10 +44,12 @@
 #define MOTOR_CONTROL_CAL_MAP_TRAVEL_TOLERANCE      0.05f
 
 /* dq電圧一定FOCの実験用。通常運転の保護にはCURRENT_LIMIT_Aを使う。 */
-#define MOTOR_CONTROL_FOC_MAX_VOLTS                 1.0f
-#define MOTOR_CONTROL_FOC_SLEW_VOLTS_PER_SEC        1.0f
+#define MOTOR_CONTROL_FOC_MAX_VOLTS                 2.0f
+#define MOTOR_CONTROL_FOC_SLEW_VOLTS_PER_SEC        2.0f
 #define MOTOR_CONTROL_FOC_MAX_RPM                   1000.0f
-#define MOTOR_CONTROL_FOC_ANGLE_MAX_AGE_US          250U
+/* 200 us requests + one diagnostic slot + I2C/IRQ latency. This guards
+ * communication freshness, NOT the sensor's unmeasured internal/filter delay. */
+#define MOTOR_CONTROL_FOC_ANGLE_MAX_AGE_US          750U
 #define MOTOR_CONTROL_FOC_MAIN_TIMEOUT_MS          20U
 #define MOTOR_CONTROL_FOC_STANDSTILL_MS            300U
 #define MOTOR_CONTROL_FOC_STANDSTILL_RAD           0.02f
@@ -69,9 +74,10 @@
 #define MOTOR_CONTROL_CURRENT_KI_Q                  120.0f
 #define MOTOR_CONTROL_CURRENT_INTEGRAL_LIMIT_D      15.0f
 #define MOTOR_CONTROL_CURRENT_INTEGRAL_LIMIT_Q      15.0f
-#define MOTOR_CONTROL_CURRENT_REF_MAX_A             15.0f
+/* Keep command magnitude below the user-selected 10 A phase-current trip. */
+#define MOTOR_CONTROL_CURRENT_REF_MAX_A             9.0f
 #define MOTOR_CONTROL_CURRENT_SLEW_A_PER_SEC         60.0f
-#define MOTOR_CONTROL_CURRENT_MAX_VOLTS             5.0f
+#define MOTOR_CONTROL_CURRENT_MAX_VOLTS             2.0f
 
 /* Charge all three bootstrap capacitors before each PWM start. */
 #define MOTOR_CONTROL_BOOTSTRAP_CHARGE_US           750U

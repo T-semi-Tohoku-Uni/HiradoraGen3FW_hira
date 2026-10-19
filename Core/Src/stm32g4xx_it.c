@@ -22,7 +22,6 @@
 #include "stm32g4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "as5047p.h"
 #include "can_comm.h"
 /* USER CODE END Includes */
 
@@ -230,7 +229,6 @@ void DMA1_Channel1_IRQHandler(void)
 void DMA1_Channel2_IRQHandler(void)
 {
   /* USER CODE BEGIN DMA1_Channel2_IRQn 0 */
-  if (AS5047P_DMA_IRQHandler(&hdma_spi1_rx)) return; /* 専用処理済みならHALで再処理しない。 */
 
   /* USER CODE END DMA1_Channel2_IRQn 0 */
   HAL_DMA_IRQHandler(&hdma_spi1_rx);
@@ -245,7 +243,6 @@ void DMA1_Channel2_IRQHandler(void)
 void DMA1_Channel3_IRQHandler(void)
 {
   /* USER CODE BEGIN DMA1_Channel3_IRQn 0 */
-  if (AS5047P_DMA_IRQHandler(hspi1.hdmatx)) return; /* 専用処理済みならHALで再処理しない。 */
 
   /* USER CODE END DMA1_Channel3_IRQn 0 */
   HAL_DMA_IRQHandler(&hdma_spi1_tx);
@@ -345,7 +342,6 @@ void I2C1_ER_IRQHandler(void)
 void SPI1_IRQHandler(void)
 {
   /* USER CODE BEGIN SPI1_IRQn 0 */
-  if (AS5047P_SPI_IRQHandler(&hspi1)) return; /* 専用処理済みならHALで再処理しない。 */
 
   /* USER CODE END SPI1_IRQn 0 */
   HAL_SPI_IRQHandler(&hspi1);

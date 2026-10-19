@@ -3,7 +3,7 @@
 #include "motor_control_config.h"
 #include "current_sense.h"
 #include "bus_voltage.h"
-#include "as5047p.h"
+#include "as5600.h"
 #include "voltage_vector.h"
 #include "console.h"
 #include "foc_voltage.h"
@@ -43,7 +43,7 @@ static CalibrationRecord map_source;
 static float map_base, map_origin_position, map_forward_travel;
 static float map_command_delta, map_command_progress;
 static void StartMap(void);
-static void MapTask(uint32_t now, const AS5047P_Sample *sample, bool fresh, float vm);
+static void MapTask(uint32_t now, const AS5600_Sample *sample, bool fresh, float vm);
 static float CurrentLimit(void)
 {
   return operation == CAL_OP_MAP ? MOTOR_CONTROL_CAL_MAP_CURRENT_LIMIT_A : MOTOR_CONTROL_CAL_CURRENT_LIMIT_A;
@@ -282,9 +282,9 @@ bool MotorCalibration_ProcessCommand(const char *command)
     }
     printf("Saving calibration; wait for completion before sending commands\r\n");
     if (Console_Flush(1000U) != HAL_OK) { printf("Save cancelled: UART busy\r\n"); return true; }
-    AS5047P_Pause();
+    AS5600_Pause();
     saved = CalibrationStore_Save(&record);
-    AS5047P_Resume();
+    AS5600_Resume();
     printf("Calibration flash %s\r\n", saved ? "saved and verified" : "FAILED; RAM result only");
   } else if (Same(arg,"map apply")) {
     if (FocVoltage_IsActive() || MotorCalibration_IsActive() ||
@@ -309,8 +309,8 @@ bool MotorCalibration_ProcessCommand(const char *command)
     if (MotorCalibration_IsActive() || !MotorControl_IsStopped() || CurrentSense_IsBusy()) {
       printf("Send stop and adc stop, wait for idle, then cal start\r\n"); return true;
     }
-    AS5047P_Sample sample; BusVoltageSample vm;
-    if (!AS5047P_GetSample(&sample) || !BusVoltage_GetSample(&vm) || vm.overvoltage ||
+    AS5600_Sample sample; BusVoltageSample vm;
+    if (!AS5600_GetSample(&sample) || !BusVoltage_GetSample(&vm) || vm.overvoltage ||
         vm.volts < MOTOR_CONTROL_VM_MIN_VOLTS) {
       printf("Calibration blocked: invalid encoder or VM\r\n"); return true;
     }
@@ -351,8 +351,8 @@ static void StartMap(void)
   if (FocVoltage_IsActive() || MotorCalibration_IsActive() || !MotorControl_IsStopped() || CurrentSense_IsBusy()) {
     printf("Send stop and adc stop, wait for idle, then cal map\r\n"); return;
   }
-  AS5047P_Sample sample; BusVoltageSample vm;
-  if (!AS5047P_GetSample(&sample) || !BusVoltage_GetSample(&vm) || vm.overvoltage ||
+  AS5600_Sample sample; BusVoltageSample vm;
+  if (!AS5600_GetSample(&sample) || !BusVoltage_GetSample(&vm) || vm.overvoltage ||
       !isfinite(sample.mechanical_rad) || !isfinite(vm.volts) ||
       vm.volts < MOTOR_CONTROL_VM_MIN_VOLTS || vm.volts > MOTOR_CONTROL_VM_MAX_VOLTS) {
     printf("Cal map blocked: invalid encoder or VM\r\n"); return;
@@ -432,7 +432,7 @@ static void MapSummary(float return_error)
     (double)(hypotf(map_stats[1].sum_sin,map_stats[1].sum_cos)/(float)map_stats[1].count),
     (double)candidate,(double)record.offset,(double)peak_current);
 }
-static void MapTask(uint32_t now, const AS5047P_Sample *sample, bool fresh, float vm)
+static void MapTask(uint32_t now, const AS5600_Sample *sample, bool fresh, float vm)
 {
   if (!isfinite(sample->mechanical_rad) || !isfinite(vm) || vm > MOTOR_CONTROL_VM_MAX_VOLTS) {
     MotorCalibration_TripISR("invalid encoder or VM"); Finish(fault); return;
@@ -534,8 +534,8 @@ void MotorCalibration_Task(void)
   uint32_t now = HAL_GetTick();
   if (now == task_ms) return;
   task_ms = now;
-  AS5047P_Sample sample; BusVoltageSample vm;
-  if (!AS5047P_GetSample(&sample) || !BusVoltage_GetSample(&vm) || vm.overvoltage ||
+  AS5600_Sample sample; BusVoltageSample vm;
+  if (!AS5600_GetSample(&sample) || !BusVoltage_GetSample(&vm) || vm.overvoltage ||
       vm.volts < MOTOR_CONTROL_VM_MIN_VOLTS) {
     MotorCalibration_TripISR("invalid encoder or VM"); Finish(fault); return;
   }
