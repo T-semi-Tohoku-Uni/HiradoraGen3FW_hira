@@ -21,7 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "as5047p.h"
+#include "as5600.h"
 #include "console.h"
 #include "can_comm.h"
 #include "current_sense.h"
@@ -58,7 +58,9 @@ ADC_HandleTypeDef hadc2;
 
 FDCAN_HandleTypeDef hfdcan1;
 
+I2C_HandleTypeDef hi2c1;
 I2C_HandleTypeDef hi2c3;
+DMA_HandleTypeDef hdma_i2c1_rx;
 
 OPAMP_HandleTypeDef hopamp1;
 OPAMP_HandleTypeDef hopamp2;
@@ -94,6 +96,7 @@ static void MX_ADC2_Init(void);
 static void MX_OPAMP3_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_FDCAN1_Init(void);
+static void MX_I2C1_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -243,6 +246,7 @@ int main(void)
   MX_OPAMP3_Init();
   MX_SPI1_Init();
   MX_FDCAN1_Init();
+  MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
   VoltageVector_Init();
   Console_Init(&huart1);
@@ -269,9 +273,14 @@ int main(void)
   }
   else
   {
+#if MOTOR_CONTROL_ANGLE_ACQUISITION_ONLY
+    printf("Motor initialized; PWM disabled (AS5600 acquisition only)\r\n");
+#else
     printf("Motor initialized; PWM stopped (explicit start required)\r\n");
+#endif
   }
-  AS5047P_Init(&hspi1, &htim1);
+  /* AS5047P/FOC stays uninitialized: AS5600 bring-up is observation only. */
+  AS5600_Init(&hi2c1);
   MotorCalibration_Init();
   CanComm_Init(&hfdcan1); /* CAN駆動は明示armと新しいゼロ指令を必要とする。 */
   printf("Command: <offset>, u/v/w <offset>, mid, stop, start, "
@@ -291,7 +300,7 @@ int main(void)
     if (BusVoltage_IsAcquiring()) continue;
     CurrentSense_Task();
     NTC_Task();
-    AS5047P_Task();
+    AS5600_Task();
     MotorCalibration_Task();
     FocVoltage_Task();
     FocVoltage_ReportTask();
@@ -307,7 +316,7 @@ int main(void)
         if (FocVoltage_ProcessCommand(motor_command) ||
             MotorCalibration_ProcessCommand(motor_command) ||
             Console_ProcessCommand(motor_command) ||
-            AS5047P_ProcessCommand(motor_command) ||
+            AS5600_ProcessCommand(motor_command) ||
             BusVoltage_ProcessCommand(motor_command) ||
             CurrentSense_ProcessCommand(motor_command)) {
           /* Logger commands remain available while streaming. */
@@ -322,7 +331,7 @@ int main(void)
                !Console_ProcessCommand(motor_command) &&
                !BusVoltage_ProcessCommand(motor_command) &&
                !ProcessGateDriverFaultCommand(motor_command) &&
-               !AS5047P_ProcessCommand(motor_command) &&
+               !AS5600_ProcessCommand(motor_command) &&
                !NTC_ProcessCommand(motor_command) &&
                !CurrentSense_ProcessCommand(motor_command))
       {
@@ -614,6 +623,54 @@ static void MX_FDCAN1_Init(void)
   /* USER CODE BEGIN FDCAN1_Init 2 */
 
   /* USER CODE END FDCAN1_Init 2 */
+
+}
+
+/**
+  * @brief I2C1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_I2C1_Init(void)
+{
+
+  /* USER CODE BEGIN I2C1_Init 0 */
+
+  /* USER CODE END I2C1_Init 0 */
+
+  /* USER CODE BEGIN I2C1_Init 1 */
+
+  /* USER CODE END I2C1_Init 1 */
+  hi2c1.Instance = I2C1;
+  hi2c1.Init.Timing = 0x10F32A82;
+  hi2c1.Init.OwnAddress1 = 0;
+  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c1.Init.OwnAddress2 = 0;
+  hi2c1.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
+  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Analogue filter
+  */
+  if (HAL_I2CEx_ConfigAnalogFilter(&hi2c1, I2C_ANALOGFILTER_ENABLE) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Digital filter
+  */
+  if (HAL_I2CEx_ConfigDigitalFilter(&hi2c1, 0) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN I2C1_Init 2 */
+
+  /* USER CODE END I2C1_Init 2 */
 
 }
 
@@ -1029,6 +1086,9 @@ static void MX_DMA_Init(void)
   /* DMA1_Channel3_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Channel3_IRQn, 1, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel3_IRQn);
+  /* DMA1_Channel4_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel4_IRQn, 1, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel4_IRQn);
 
 }
 

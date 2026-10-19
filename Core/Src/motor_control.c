@@ -232,6 +232,11 @@ HAL_StatusTypeDef MotorControl_ResetTimerPhase(TIM_HandleTypeDef *timer)
 
 static HAL_StatusTypeDef MotorControl_PreparePwmStart(bool (*permitted)(void))
 {
+#if MOTOR_CONTROL_ANGLE_ACQUISITION_ONLY
+  MotorControl_Stop();
+  printf("PWM start disabled: AS5600 angle acquisition only\r\n");
+  return HAL_ERROR;
+#endif
   TIM_TypeDef *tim = motor_timer->Instance;
   STSPIN32G4_FaultReport report;
   HAL_StatusTypeDef result;

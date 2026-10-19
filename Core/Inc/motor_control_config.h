@@ -1,6 +1,9 @@
 #ifndef MOTOR_CONTROL_CONFIG_H
 #define MOTOR_CONTROL_CONFIG_H
 
+/* AS5600 angle acquisition bring-up: block every PWM start, including bootstrap. */
+#define MOTOR_CONTROL_ANGLE_ACQUISITION_ONLY         1
+
 /* Motor and open-loop six-step parameters. */
 #define MOTOR_CONTROL_POLE_PAIRS                    7U
 

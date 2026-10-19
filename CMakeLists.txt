@@ -70,6 +70,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/motor_calibration.c
     Core/Src/bus_voltage.c
     Core/Src/as5047p.c
+    Core/Src/as5600.c
     Core/Src/console.c
     Core/Src/current_sense.c
     Core/Src/dma_logger.c
